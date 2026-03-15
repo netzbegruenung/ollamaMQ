@@ -39,6 +39,9 @@ pub struct AppState {
     pub user_ips: Mutex<HashMap<String, IpAddr>>,
     pub blocked_ips: Mutex<HashSet<IpAddr>>,
     pub blocked_users: Mutex<HashSet<String>>,
+    pub vip_user: Mutex<Option<String>>,
+    pub boost_user: Mutex<Option<String>>,
+    pub global_counter: Mutex<usize>,
     pub notify: Notify,
     pub ollama_url: String,
     pub timeout: u64,
@@ -55,6 +58,9 @@ impl AppState {
             user_ips: Mutex::new(HashMap::new()),
             blocked_ips: Mutex::new(blocked_ips),
             blocked_users: Mutex::new(blocked_users),
+            vip_user: Mutex::new(None),
+            boost_user: Mutex::new(None),
+            global_counter: Mutex::new(0),
             notify: Notify::new(),
             ollama_url,
             timeout,
@@ -138,29 +144,52 @@ pub async fn run_worker(state: Arc<AppState>) {
     loop {
         let task_opt = {
             let mut queues = state.queues.lock().unwrap();
+            let vip = state.vip_user.lock().unwrap().clone();
+            let boost = state.boost_user.lock().unwrap().clone();
+            let mut counter = state.global_counter.lock().unwrap();
 
-            // Get all user IDs that currently have tasks
-            let mut active_users: Vec<String> = queues
-                .iter()
-                .filter(|(_, q)| !q.is_empty())
-                .map(|(k, _)| k.clone())
-                .collect();
-
-            // Sort to ensure stable round-robin
-            active_users.sort();
-
-            if active_users.is_empty() {
-                None
-            } else {
-                if current_idx >= active_users.len() {
-                    current_idx = 0;
+            // 1. Check VIP first (Absolute priority)
+            let mut target_user = None;
+            if let Some(vip_id) = &vip {
+                if queues.get(vip_id).map_or(false, |q| !q.is_empty()) {
+                    target_user = Some(vip_id.clone());
                 }
+            }
 
-                let user_id = active_users[current_idx].clone();
-                let task = queues.get_mut(&user_id).unwrap().pop_front().unwrap();
+            // 2. Check Boost (Every 5th request)
+            if target_user.is_none() && (*counter + 1) % 5 == 0 {
+                if let Some(boost_id) = &boost {
+                    if queues.get(boost_id).map_or(false, |q| !q.is_empty()) {
+                        target_user = Some(boost_id.clone());
+                    }
+                }
+            }
 
-                current_idx += 1;
-                Some((user_id, task))
+            // 3. Fallback to Round-Robin
+            if target_user.is_none() {
+                let mut active_users: Vec<String> = queues
+                    .iter()
+                    .filter(|(_, q)| !q.is_empty())
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                active_users.sort();
+
+                if !active_users.is_empty() {
+                    if current_idx >= active_users.len() {
+                        current_idx = 0;
+                    }
+                    target_user = Some(active_users[current_idx].clone());
+                    current_idx += 1;
+                }
+            }
+
+            match target_user {
+                Some(user_id) => {
+                    let task = queues.get_mut(&user_id).unwrap().pop_front().unwrap();
+                    *counter += 1;
+                    Some((user_id, task))
+                }
+                None => None,
             }
         };
 
@@ -168,13 +197,16 @@ pub async fn run_worker(state: Arc<AppState>) {
             Some((user_id, task)) => {
                 // Check if user or IP was blocked after the task was queued
                 let is_blocked = {
-                    let blocked_users = state.blocked_users.lock().unwrap();
-                    let blocked_ips = state.blocked_ips.lock().unwrap();
                     let user_ips = state.user_ips.lock().unwrap();
-                    
+                    let blocked_ips = state.blocked_ips.lock().unwrap();
+                    let blocked_users = state.blocked_users.lock().unwrap();
+
                     let user_blocked = blocked_users.contains(&user_id);
-                    let ip_blocked = user_ips.get(&user_id).map(|ip| blocked_ips.contains(ip)).unwrap_or(false);
-                    
+                    let ip_blocked = user_ips
+                        .get(&user_id)
+                        .map(|ip| blocked_ips.contains(ip))
+                        .unwrap_or(false);
+
                     user_blocked || ip_blocked
                 };
 
@@ -198,11 +230,17 @@ pub async fn run_worker(state: Arc<AppState>) {
                     *processing.entry(user_id.clone()).or_insert(0) += 1;
                 }
 
-                info!("Processing {} for user: {}", task.path, user_id);
-                // Artificial delay to make TUI observation easier
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
                 let url = format!("{}{}", state.ollama_url, task.path);
+                let body_str = if !task.body.is_empty() {
+                    String::from_utf8_lossy(&task.body).trim().to_string()
+                } else {
+                    "EMPTY".to_string()
+                };
+
+                // info!(
+                //     "OUTGOING REQUEST to Ollama:\nMethod: {}\nURL: {}\nUser: {}\nBody: {}",
+                //     task.method, url, user_id, body_str
+                // );
 
                 let res_fut = match task.method {
                     Method::POST => client.post(url).body(task.body),
@@ -230,7 +268,7 @@ pub async fn run_worker(state: Arc<AppState>) {
 
                                     if first_chunk {
                                         let content = String::from_utf8_lossy(&chunk);
-                                        info!("Response for user {}: {}", user_id, content.trim());
+                                        // info!("Response for user {}: {}", user_id, content.trim());
                                         first_chunk = false;
                                     }
 
@@ -296,9 +334,10 @@ pub async fn proxy_handler(
         .unwrap_or("anonymous")
         .to_string();
 
+    let body_str = String::from_utf8_lossy(&body).trim().to_string();
     info!(
-        "Received {} request from user: {} (IP: {})",
-        path, user_id, ip
+        "INCOMING REQUEST:\nMethod: {}\nURI: {}\nUser: {}\nIP: {}\nHeaders: {:?}\nBody: {}",
+        method, uri, user_id, ip, headers, body_str
     );
 
     if state.is_ip_blocked(&ip) {

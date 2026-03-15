@@ -10,6 +10,8 @@
 
 - **Per-User Queuing**: Each user (identified by the `X-User-ID` header) has their own FIFO queue.
 - **Fair-Share Round-Robin Scheduling**: A background worker rotates through active users, processing one request at a time from each to prevent any single user from monopolizing the backend.
+- **VIP Mode**: Assign absolute priority to a specific user (controllable via TUI).
+- **Boost Mode**: Every 5th request is prioritized for a specific user (controllable via TUI).
 - **Active Request Tracking**: Real-time monitoring of currently processing requests (marked with `▶` in the TUI).
 - **Instant Blocking**: Drop all queued tasks immediately when a user or IP is blocked.
 - **Full Streaming Support**: Proxies streaming responses from Ollama in real-time, maintaining per-user ordering while delivering tokens as they are generated.
@@ -109,13 +111,13 @@ Point your LLM clients to the `ollamaMQ` port (`11435`) and include the `X-User-
 - `GET /health` (Internal health check)
 - `GET /` (Ollama Native)
 - `GET /api/tags` (Ollama Native)
-- `GET /api/version` (Ollama Native)
+- `GET /api/version" (Ollama Native)
 - `POST /api/embed` (Ollama Native)
 - `POST /api/generate` (Ollama Native)
 - `POST /api/chat` (Ollama Native)
 - `GET /v1/models` (OpenAI Compatible)
 - `POST /v1/embeddings` (OpenAI Compatible)
-- `POST /v1/chat/completions` (OpenAI Compatible)
+- `POST /v1/chat/completions" (OpenAI Compatible)
 - `POST /v1/completions` (OpenAI Compatible)
 
 #### Example (cURL):
@@ -136,13 +138,17 @@ The interactive TUI dashboard provides a live view of the dispatcher's state:
 
 - **`j` / `k`** or **Arrows**: Navigate the user/blocked list.
 - **`Tab`** or **`h` / `l`**: Switch between the Users and Blocked panels.
-- **`b`**: Block the selected User ID.
-- **`B`**: Block the selected user's IP address.
+- **`p`**: Toggle **VIP** status for the selected user (absolute priority).
+- **`b`**: Toggle **Boost** status for the selected user (prioritizes every 5th request).
+- **`x`**: Block the selected user.
+- **`X`**: Block the selected user's IP address.
 - **`u`**: Unblock the selected user or IP (works in both panels).
 - **`q`** or **Esc**: Exit the dashboard and stop the application.
 - **`?`**: Toggle detailed help.
 
 **Visual Indicators:**
+- `★` (Magenta): **VIP User** (absolute priority).
+- `⚡` (Yellow): **Boosted User** (every 5th request priority).
 - `▶` (Cyan): Request is currently being processed/streamed.
 - `●` (Green): User has requests waiting in the queue.
 - `○` (Gray): User is idle (no active or queued requests).
