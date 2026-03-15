@@ -334,11 +334,11 @@ pub async fn proxy_handler(
         .unwrap_or("anonymous")
         .to_string();
 
-    let body_str = String::from_utf8_lossy(&body).trim().to_string();
-    info!(
-        "INCOMING REQUEST:\nMethod: {}\nURI: {}\nUser: {}\nIP: {}\nHeaders: {:?}\nBody: {}",
-        method, uri, user_id, ip, headers, body_str
-    );
+    // let body_str = String::from_utf8_lossy(&body).trim().to_string();
+    // info!(
+    //     "INCOMING REQUEST:\nMethod: {}\nURI: {}\nUser: {}\nIP: {}\nHeaders: {:?}\nBody: {}",
+    //     method, uri, user_id, ip, headers, body_str
+    // );
 
     if state.is_ip_blocked(&ip) {
         warn!("Blocked request from IP: {} for user: {}", ip, user_id);
