@@ -1,6 +1,6 @@
 use axum::{
     Router,
-    routing::{get, post},
+    routing::{any, get, post},
 };
 use clap::Parser;
 use std::net::SocketAddr;
@@ -23,9 +23,9 @@ struct Args {
     #[arg(short, long, default_value_t = 11435)]
     port: u16,
 
-    /// Ollama server URL
-    #[arg(short, long, default_value = "http://localhost:11434")]
-    ollama_url: String,
+    /// Ollama server URLs (comma-separated list)
+    #[arg(short, long, value_delimiter = ',', default_value = "http://localhost:11434")]
+    ollama_urls: Vec<String>,
 
     /// Request timeout in seconds
     #[arg(short, long, default_value_t = 300)]
@@ -34,6 +34,10 @@ struct Args {
     /// Disable TUI dashboard
     #[arg(long)]
     no_tui: bool,
+
+    /// Allow all routes (enable fallback proxy)
+    #[arg(long, default_value_t = false)]
+    allow_all_routes: bool,
 }
 
 struct TuiState {
@@ -44,7 +48,9 @@ struct TuiState {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-    let ollama_url = args.ollama_url.trim_end_matches('/').to_string();
+    let ollama_urls: Vec<String> = args.ollama_urls.iter()
+        .map(|url| url.trim_end_matches('/').to_string())
+        .collect();
 
     // Determine if we should run TUI
     let use_tui = !args.no_tui && std::io::stdout().is_terminal();
@@ -73,26 +79,45 @@ async fn main() {
             .init();
     }
 
-    let state = Arc::new(AppState::new(ollama_url, args.timeout));
+    let state = Arc::new(AppState::new(ollama_urls, args.timeout));
 
     let worker_state = state.clone();
     tokio::spawn(async move {
         run_worker(worker_state).await;
     });
 
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/health", get(|| async { "OK" }))
-        .route("/", get(proxy_handler))
-        .route("/api/tags", get(proxy_handler))
-        .route("/api/version", get(proxy_handler))
-        .route("/api/embed", post(proxy_handler))
-        .route("/api/generate", post(proxy_handler))
-        .route("/api/chat", post(proxy_handler))
-        .route("/v1/models", get(proxy_handler))
-        .route("/v1/embeddings", post(proxy_handler))
-        .route("/v1/chat/completions", post(proxy_handler))
-        .route("/v1/completions", post(proxy_handler))
-        .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024))
+        // Ollama API Endpoints (Explicitly listed)
+        .route("/", any(proxy_handler))
+        .route("/api/generate", any(proxy_handler))
+        .route("/api/chat", any(proxy_handler))
+        .route("/api/embed", any(proxy_handler))
+        .route("/api/embeddings", any(proxy_handler))
+        .route("/api/tags", any(proxy_handler))
+        .route("/api/show", any(proxy_handler))
+        .route("/api/create", any(proxy_handler))
+        .route("/api/copy", any(proxy_handler))
+        .route("/api/delete", any(proxy_handler))
+        .route("/api/pull", any(proxy_handler))
+        .route("/api/push", any(proxy_handler))
+        .route("/api/blobs/{digest}", any(proxy_handler))
+        .route("/api/ps", any(proxy_handler))
+        .route("/api/version", any(proxy_handler))
+        // OpenAI Compatible Endpoints
+        .route("/v1/chat/completions", any(proxy_handler))
+        .route("/v1/completions", any(proxy_handler))
+        .route("/v1/embeddings", any(proxy_handler))
+        .route("/v1/models", any(proxy_handler))
+        .route("/v1/models/{model}", any(proxy_handler));
+
+    // Optional fallback
+    if args.allow_all_routes {
+        app = app.fallback(proxy_handler);
+    }
+
+    let app = app
+        .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 1024)) // 1GB limit
         .with_state(state.clone());
 
     let addr = format!("0.0.0.0:{}", args.port);

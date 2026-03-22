@@ -1,6 +1,6 @@
 # ollamaMQ
 
-`ollamaMQ` is a high-performance, asynchronous message queue dispatcher designed to sit in front of an [Ollama](https://ollama.ai/) API instance. It acts as a smart proxy that queues incoming requests from multiple users and dispatches them sequentially to the Ollama backend, preventing resource exhaustion and ensuring fair sharing of GPU/CPU resources.
+`ollamaMQ` is a high-performance, asynchronous message queue dispatcher and load balancer designed to sit in front of one or more [Ollama](https://ollama.ai/) API instances. It acts as a smart proxy that queues incoming requests from multiple users and dispatches them in parallel to multiple Ollama backends using a fair-share round-robin scheduler with least-connections load balancing.
 
 ![Rust](https://img.shields.io/badge/rust-2024-orange.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
@@ -8,16 +8,16 @@
 
 ## 🚀 Features
 
+- **Multi-Backend Load Balancing**: Distribute requests across multiple Ollama instances using a **Least Connections + Round Robin** strategy.
+- **Parallel Processing**: Unlike basic proxies, `ollamaMQ` can process multiple requests simultaneously (one per available backend), significantly increasing throughput for multiple users.
+- **Backend Health Checks**: Automatically monitors backend status every 10 seconds; offline instances are temporarily skipped and marked in the TUI.
 - **Per-User Queuing**: Each user (identified by the `X-User-ID` header) has their own FIFO queue.
-- **Fair-Share Round-Robin Scheduling**: A background worker rotates through active users, processing one request at a time from each to prevent any single user from monopolizing the backend.
-- **VIP Mode**: Assign absolute priority to a specific user (controllable via TUI).
-- **Boost Mode**: Every 5th request is prioritized for a specific user (controllable via TUI).
-- **Active Request Tracking**: Real-time monitoring of currently processing requests (marked with `▶` in the TUI).
-- **Instant Blocking**: Drop all queued tasks immediately when a user or IP is blocked.
-- **Full Streaming Support**: Proxies streaming responses from Ollama in real-time, maintaining per-user ordering while delivering tokens as they are generated.
-- **Real-Time TUI Dashboard**: A built-in terminal interface powered by `ratatui` for monitoring queue depths, active users, and request throughput in real-time.
-- **OpenAI Compatibility**: Supports standard OpenAI-compatible endpoints, making it easy to use with existing tools and libraries.
-- **Async Architecture**: Built on `tokio` and `axum` for non-blocking I/O and high concurrency.
+- **Fair-Share Scheduling**: Prevents any single user from monopolizing all available backends.
+- **Transparent Header Forwarding**: Full support for all HTTP headers (including `X-User-ID`) passed to and from Ollama, ensuring compatibility with tools like **Claude Code**.
+- **VIP & Boost Modes**: Absolute priority (VIP) or increased frequency (Boost) for specific users.
+- **Real-Time TUI Dashboard**: Monitor backend health, active requests, queue depths, and throughput in real-time.
+- **OpenAI Compatibility**: Supports standard OpenAI-compatible endpoints.
+- **Async Architecture**: Built on `tokio` and `axum` for high concurrency.
 
 ![ollamaMQ TUI Dashboard](demo.gif)
 
@@ -81,16 +81,17 @@ docker run -d \
 `ollamaMQ` supports several options to configure the proxy:
 
 - `-p, --port <PORT>`: Port to listen on (default: `11435`)
-- `-o, --ollama-url <URL>`: Ollama server URL (default: `http://localhost:11434`)
+- `-o, --ollama-urls <URL1,URL2>`: Comma-separated list of Ollama server URLs (default: `http://localhost:11434`)
 - `-t, --timeout <SECONDS>`: Request timeout in seconds (default: `300`)
 - `--no-tui`: Disable the interactive TUI dashboard (useful for Docker/CI)
+- `--allow-all-routes`: Enable fallback proxy for non-standard endpoints
 - `-h, --help`: Print help message
 - `-V, --version`: Print version information
 
 **Example:**
 
 ```bash
-ollamaMQ --port 8080 --ollama-url http://192.168.1.5:11434 --timeout 600 --no-tui
+ollamaMQ --port 8080 --ollama-urls http://10.0.0.1:11434,http://10.0.0.2:11434 --timeout 600
 ```
 
 **Docker Example:**
@@ -109,16 +110,27 @@ Point your LLM clients to the `ollamaMQ` port (`11435`) and include the `X-User-
 #### Supported Endpoints:
 
 - `GET /health` (Internal health check)
-- `GET /` (Ollama Native)
-- `GET /api/tags` (Ollama Native)
-- `GET /api/version" (Ollama Native)
-- `POST /api/embed` (Ollama Native)
-- `POST /api/generate` (Ollama Native)
-- `POST /api/chat` (Ollama Native)
-- `GET /v1/models` (OpenAI Compatible)
-- `POST /v1/embeddings` (OpenAI Compatible)
-- `POST /v1/chat/completions" (OpenAI Compatible)
+- `GET /` (Ollama Status)
+- `POST /api/generate`
+- `POST /api/chat`
+- `POST /api/embed`
+- `POST /api/embeddings`
+- `GET /api/tags`
+- `POST /api/show`
+- `POST /api/create`
+- `POST /api/copy`
+- `DELETE /api/delete`
+- `POST /api/pull`
+- `POST /api/push`
+- `GET/HEAD/POST /api/blobs/{digest}`
+- `GET /api/ps`
+- `GET /api/version`
+- `POST /v1/chat/completions` (OpenAI Compatible)
 - `POST /v1/completions` (OpenAI Compatible)
+- `POST /v1/embeddings` (OpenAI Compatible)
+- `GET /v1/models` (OpenAI Compatible)
+- `GET /v1/models/{model}` (OpenAI Compatible)
+
 
 #### Example (cURL):
 
@@ -269,11 +281,12 @@ docker run -d \
 
 ### Request Flow
 
-1. Client sends a request to one of the supported endpoints with `X-User-ID`.
+1. Client sends a request with `X-User-ID`.
 2. `ollamaMQ` pushes the request into a user-specific queue.
-3. The background worker selects the next user in rotation and pops a task.
-4. The task is forwarded to the Ollama backend (`localhost:11434`).
-5. The response is streamed back to the client in real-time through an async channel, keeping the worker occupied until the generation is complete.
+3. The background worker checks for available backends (Online & not busy).
+4. If a backend is free, the worker pops the next task (fair-share rotation) and **spawns a parallel task**.
+5. The request is proxied to the selected Ollama backend.
+6. The response is streamed back to the client in real-time, while the worker can immediately start another task on a different backend.
 
 ## 📦 Publishing to Docker Hub
 

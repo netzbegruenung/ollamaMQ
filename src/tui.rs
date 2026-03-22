@@ -13,7 +13,7 @@ use std::io;
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use crate::dispatcher::AppState;
+use crate::dispatcher::{AppState, BackendStatus};
 
 #[derive(PartialEq)]
 enum Panel {
@@ -32,6 +32,7 @@ struct StateSnapshot {
     vip_user: Option<String>,
     boost_user: Option<String>,
     user_ids: Vec<String>,
+    backends: Vec<BackendStatus>,
 }
 
 pub struct TuiDashboard {
@@ -64,6 +65,7 @@ impl TuiDashboard {
         let blocked_users = state.blocked_users.lock().unwrap().clone();
         let vip_user = state.vip_user.lock().unwrap().clone();
         let boost_user = state.boost_user.lock().unwrap().clone();
+        let backends = state.backends.lock().unwrap().clone();
 
         let mut user_ids: Vec<String> = queues_len.keys().cloned().collect();
         user_ids.sort_by(|a, b| {
@@ -88,6 +90,7 @@ impl TuiDashboard {
             vip_user,
             boost_user,
             user_ids,
+            backends,
         }
     }
 
@@ -294,15 +297,20 @@ impl TuiDashboard {
 
         let content_chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .constraints([
+                Constraint::Percentage(25),
+                Constraint::Percentage(40),
+                Constraint::Percentage(35),
+            ])
             .split(main_chunks[1]);
 
-        f.render_stateful_widget(self.render_users(snapshot), content_chunks[0], &mut self.table_state);
+        f.render_widget(self.render_backends(snapshot), content_chunks[0]);
+        f.render_stateful_widget(self.render_users(snapshot), content_chunks[1], &mut self.table_state);
 
         let right_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-            .split(content_chunks[1]);
+            .split(content_chunks[2]);
 
         f.render_stateful_widget(self.render_queues(snapshot, right_chunks[0].width), right_chunks[0], &mut self.table_state);
         f.render_stateful_widget(self.render_blocked(snapshot), right_chunks[1], &mut self.blocked_table_state);
@@ -342,6 +350,41 @@ impl TuiDashboard {
         ];
 
         Paragraph::new(Line::from(stats_line)).block(Block::default().borders(Borders::ALL))
+    }
+
+    fn render_backends(&self, snapshot: &StateSnapshot) -> Table<'static> {
+        let rows: Vec<Row> = snapshot.backends.iter().map(|b| {
+            let url = b.url.replace("http://", "").replace("https://", "");
+            
+            let (status_sym, status_style) = if b.is_online {
+                ("● ", Style::default().fg(Color::Green))
+            } else {
+                ("○ ", Style::default().fg(Color::Red))
+            };
+
+            let req_style = if b.active_requests > 0 {
+                Style::default().fg(Color::Cyan).bold()
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+
+            Row::new(vec![
+                Cell::from(Line::from(vec![
+                    Span::styled(status_sym, status_style),
+                    Span::styled(url, if b.is_online { Style::default().fg(Color::White) } else { Style::default().fg(Color::DarkGray).add_modifier(Modifier::CROSSED_OUT) }),
+                ])),
+                Cell::from(b.active_requests.to_string()).style(req_style),
+                Cell::from(b.processed_count.to_string()).style(Style::default().fg(Color::DarkGray)),
+            ])
+        }).collect();
+
+        Table::new(rows, [
+            Constraint::Min(10),
+            Constraint::Length(4),
+            Constraint::Length(6),
+        ])
+        .header(Row::new(vec!["Backend", "Act", "Done"]).style(Style::default().fg(Color::Yellow).bold()).bottom_margin(1))
+        .block(Block::default().title(" Ollama Instances ").borders(Borders::ALL))
     }
 
     fn render_users(&self, snapshot: &StateSnapshot) -> Table<'static> {
