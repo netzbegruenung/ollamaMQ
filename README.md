@@ -100,7 +100,7 @@ ollamaMQ --port 8080 --ollama-urls http://10.0.0.1:11434,http://10.0.0.2:11434 -
 docker run -d \
   --name ollamamq \
   -p 8080:8080 \
-  chlebon/ollamamq --port 8080 --ollama-url http://192.168.1.5:11434 --timeout 600
+  chlebon/ollamamq --port 8080 --ollama-urls http://192.168.1.5:11434 --timeout 600
 ```
 
 ### API Proxying
@@ -185,7 +185,7 @@ services:
     ports:
       - "11435:11435"
     environment:
-      - OLLAMA_URL=http://host.docker.internal:11434
+      - OLLAMA_URLS=http://host.docker.internal:11434
       - PORT=11435
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -208,11 +208,11 @@ The Dockerfile uses a multi-stage build:
 
 ### Environment Variables
 
-| Variable     | Description                    | Default                  |
-| ------------ | ------------------------------ | ------------------------ |
-| `OLLAMA_URL` | URL of the Ollama server       | `http://localhost:11434` |
-| `PORT`       | Port for ollamaMQ to listen on | `11435`                  |
-| `TIMEOUT`    | Request timeout in seconds     | `300`                    |
+| Variable      | Description                    | Default                  |
+| ------------- | ------------------------------ | ------------------------ |
+| `OLLAMA_URLS` | URLs of the Ollama servers     | `http://localhost:11434` |
+| `PORT`        | Port for ollamaMQ to listen on | `11435`                  |
+| `TIMEOUT`     | Request timeout in seconds     | `300`                    |
 
 ### Connecting to Different Ollama Servers
 
@@ -222,7 +222,7 @@ The Dockerfile uses a multi-stage build:
 docker run -d \
   --name ollamamq \
   -p 11435:11435 \
-  -e OLLAMA_URL=http://host.docker.internal:11434 \
+  -e OLLAMA_URLS=http://host.docker.internal:11434 \
   chlebon/ollamamq
 ```
 
@@ -232,7 +232,7 @@ docker run -d \
 docker run -d \
   --name ollamamq \
   -p 11435:11435 \
-  -e OLLAMA_URL=https://ollama.example.com:11434 \
+  -e OLLAMA_URLS=https://ollama.example.com:11434 \
   chlebon/ollamamq
 ```
 
@@ -242,7 +242,7 @@ docker run -d \
 docker run -d \
   --name ollamamq \
   -p 8080:8080 \
-  -e OLLAMA_URL=http://host.docker.internal:11436 \
+  -e OLLAMA_URLS=http://host.docker.internal:11436 \
   -e PORT=8080 \
   chlebon/ollamamq
 ```
@@ -254,7 +254,7 @@ docker run -d \
   --name ollamamq \
   --network ollama-network \
   -p 11435:11435 \
-  -e OLLAMA_URL=http://ollama:11434 \
+  -e OLLAMA_URLS=http://ollama:11434 \
   chlebon/ollamamq
 ```
 

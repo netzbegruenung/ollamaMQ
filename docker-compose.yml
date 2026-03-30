@@ -20,7 +20,7 @@ services:
       # 1. Ensure Ollama is listening on 0.0.0.0 (export OLLAMA_HOST=0.0.0.0)
       # 2. Use http://host.docker.internal:11434
       # If using the 'ollama' service above, use http://ollama:11434
-      - OLLAMA_URL=http://host.docker.internal:11434
+      - OLLAMA_URLS=http://host.docker.internal:11434
       - PORT=11435
       - TIMEOUT=300
       - RUST_LOG=info
