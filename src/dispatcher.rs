@@ -16,6 +16,8 @@ use tokio::sync::{Notify, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{info, warn};
 
+use crate::auth::UserRegistry;
+
 const BLOCKED_FILE: &str = "blocked_items.json";
 
 #[derive(Serialize, Deserialize, Default)]
@@ -62,10 +64,13 @@ pub struct AppState {
     pub backends: Mutex<Vec<BackendStatus>>,
     pub last_backend_idx: Mutex<usize>,
     pub timeout: u64,
+    /// User registry loaded from `/etc/ollama-mq/users.yaml`.
+    /// Wrapped in `Arc` so the SIGHUP handler can atomically swap it.
+    pub user_registry: Mutex<Arc<UserRegistry>>,
 }
 
 impl AppState {
-    pub fn new(ollama_urls: Vec<String>, timeout: u64) -> Self {
+    pub fn new(ollama_urls: Vec<String>, timeout: u64, registry: UserRegistry) -> Self {
         let (blocked_ips, blocked_users) = Self::load_blocked_items();
         let backends = ollama_urls.into_iter()
             .map(|url| BackendStatus {
@@ -92,6 +97,7 @@ impl AppState {
             backends: Mutex::new(backends),
             last_backend_idx: Mutex::new(0),
             timeout,
+            user_registry: Mutex::new(Arc::new(registry)),
         }
     }
 
@@ -361,11 +367,31 @@ pub async fn proxy_handler(
 ) -> impl IntoResponse {
     let path = uri.path().to_string();
     let ip = addr.ip();
-    let user_id = headers
-        .get("X-User-ID")
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("anonymous")
-        .to_string();
+
+    // --- Authentication ---
+    // Extract and validate the Bearer token from the Authorization header.
+    let raw_token = match headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        Some(token) => token.to_string(),
+        None => {
+            warn!("Rejected request from {}: missing or malformed Authorization header", ip);
+            return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+        }
+    };
+
+    let user_id = {
+        let registry = state.user_registry.lock().unwrap().clone();
+        match registry.authenticate(&raw_token) {
+            Some(uid) => uid.to_string(),
+            None => {
+                warn!("Rejected request from {}: invalid token", ip);
+                return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+            }
+        }
+    };
 
     if state.is_ip_blocked(&ip) {
         warn!("Blocked request from IP: {} for user: {}", ip, user_id);

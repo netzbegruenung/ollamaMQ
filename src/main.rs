@@ -1,17 +1,20 @@
 use axum::{
     Router,
-    routing::{any, get, post},
+    routing::{any, get},
 };
 use clap::Parser;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::Notify;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
+mod auth;
 mod dispatcher;
 mod tui;
 
+use crate::auth::{UserRegistry, USERS_FILE};
 use crate::dispatcher::{AppState, proxy_handler, run_worker};
 
 use std::io::IsTerminal;
@@ -79,7 +82,45 @@ async fn main() {
             .init();
     }
 
-    let state = Arc::new(AppState::new(ollama_urls, args.timeout));
+    // Load user registry from /etc/ollama-mq/users.yaml.
+    // An empty registry is used on failure so the server starts up, but all
+    // requests will be rejected with 401 until a valid file is in place.
+    let registry = match UserRegistry::load(USERS_FILE) {
+        Ok(r) => {
+            info!("Loaded user registry from {}", USERS_FILE);
+            r
+        }
+        Err(e) => {
+            warn!("Could not load {}: {}. All requests will be rejected.", USERS_FILE, e);
+            UserRegistry::empty()
+        }
+    };
+
+    let state = Arc::new(AppState::new(ollama_urls, args.timeout, registry));
+
+    // Reload the user registry on SIGHUP without restarting.
+    let sighup_state = state.clone();
+    tokio::spawn(async move {
+        let mut sig = match signal(SignalKind::hangup()) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("Could not register SIGHUP handler: {}", e);
+                return;
+            }
+        };
+        loop {
+            sig.recv().await;
+            match UserRegistry::load(USERS_FILE) {
+                Ok(new_registry) => {
+                    *sighup_state.user_registry.lock().unwrap() = Arc::new(new_registry);
+                    info!("User registry reloaded from {} via SIGHUP", USERS_FILE);
+                }
+                Err(e) => {
+                    warn!("Failed to reload {} via SIGHUP: {}", USERS_FILE, e);
+                }
+            }
+        }
+    });
 
     let worker_state = state.clone();
     tokio::spawn(async move {
