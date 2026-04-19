@@ -37,6 +37,17 @@ struct ModelInfo {
     name: String,
 }
 
+#[derive(Deserialize)]
+struct ModelAliasesConfig {
+    model_aliases: Vec<ModelAliasGroup>,
+}
+
+#[derive(Deserialize)]
+struct ModelAliasGroup {
+    #[serde(flatten)]
+    entries: HashMap<String, Vec<String>>,
+}
+
 pub enum ResponsePart {
     Status(StatusCode, HeaderMap),
     Chunk(Bytes),
@@ -81,22 +92,36 @@ pub struct AppState {
     /// User registry loaded from `/etc/ollama-mq/users.yaml`.
     /// Wrapped in `Arc` so the SIGHUP handler can atomically swap it.
     pub user_registry: Mutex<Arc<UserRegistry>>,
+    /// Model aliases: alias_name → real_model_name
+    pub model_aliases: Mutex<HashMap<String, String>>,
 }
 
 impl AppState {
-    pub fn new(ollama_urls: Vec<String>, timeout: u64, registry: UserRegistry) -> Self {
+    pub fn new(
+        ollama_urls: Vec<String>,
+        timeout: u64,
+        registry: UserRegistry,
+        model_aliases_path: Option<String>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let (blocked_ips, blocked_users) = Self::load_blocked_items();
         let backends = ollama_urls.into_iter()
             .map(|url| BackendStatus {
                 url,
                 active_requests: 0,
                 processed_count: 0,
-                is_online: true, // Default to true until first check
+                is_online: true,
                 available_models: HashSet::new(),
             })
             .collect();
 
-        Self {
+        // Load model aliases if path is specified
+        let model_aliases = if let Some(path) = model_aliases_path {
+            ModelAliasesConfig::load(&path)?
+        } else {
+            HashMap::new()
+        };
+
+        Ok(Self {
             queues: Mutex::new(HashMap::new()),
             processing_counts: Mutex::new(HashMap::new()),
             processed_counts: Mutex::new(HashMap::new()),
@@ -113,7 +138,8 @@ impl AppState {
             last_backend_idx: Mutex::new(0),
             timeout,
             user_registry: Mutex::new(Arc::new(registry)),
-        }
+            model_aliases: Mutex::new(model_aliases),
+        })
     }
 
     fn load_blocked_items() -> (HashSet<IpAddr>, HashSet<String>) {
@@ -180,6 +206,29 @@ impl AppState {
     pub fn is_user_blocked(&self, user_id: &str) -> bool {
         self.blocked_users.lock().unwrap().contains(user_id)
     }
+
+    /// Reload model aliases from the specified YAML file
+    pub fn reload_model_aliases(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let aliases = ModelAliasesConfig::load(path)?;
+        *self.model_aliases.lock().unwrap() = aliases;
+        Ok(())
+    }
+}
+
+impl ModelAliasesConfig {
+    fn load(path: &str) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
+        let content = std::fs::read_to_string(path)?;
+        let parsed: ModelAliasesConfig = serde_yaml::from_str(&content)?;
+        let mut map = HashMap::new();
+        for group in parsed.model_aliases {
+            for (real_name, aliases) in group.entries {
+                for alias in aliases {
+                    map.insert(alias, real_name.clone());
+                }
+            }
+        }
+        Ok(map)
+    }
 }
 
 /// Paths that carry a `model` field in their JSON body.
@@ -194,13 +243,31 @@ const MODEL_PATHS: &[&str] = &[
 ];
 
 /// Extract the `model` field from the request body when the path is model-aware.
+/// If the model is an alias, it's replaced with the real name in the body.
 /// Returns `None` for non-model endpoints or when the field is absent.
-fn extract_model_name(body: &Bytes, path: &str) -> Option<String> {
+fn extract_model_name(body: &mut Bytes, path: &str, aliases: &Mutex<HashMap<String, String>>) -> Option<String> {
     if !MODEL_PATHS.iter().any(|p| path.starts_with(p)) {
         return None;
     }
-    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
-    v.get("model")?.as_str().map(|s| normalize_model_tag(s))
+
+    let mut v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let model_str = v.get("model")?.as_str()?.to_string();
+
+    // Check if this is an alias and resolve it
+    let real_model = {
+        let aliases_map = aliases.lock().unwrap();
+        aliases_map.get(&model_str).cloned().unwrap_or_else(|| model_str.clone())
+    };
+
+    // If we resolved an alias, update the request body
+    if real_model != model_str {
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("model".to_string(), serde_json::json!(real_model));
+            *body = Bytes::from(serde_json::to_vec(&v).ok()?);
+        }
+    }
+
+    Some(normalize_model_tag(&real_model))
 }
 
 /// Append `:latest` if the model name has no explicit tag.
@@ -323,11 +390,12 @@ pub async fn run_worker(state: Arc<AppState>) {
 
                     match target_user {
                         Some(user_id) => {
-                            let task = queues.get_mut(&user_id).unwrap().pop_front().unwrap();
+                            let mut task = queues.get_mut(&user_id).unwrap().pop_front().unwrap();
                             *counter += 1;
 
                             // Filter backends by model availability.
-                            let model_opt = extract_model_name(&task.body, &task.path);
+                            let task_body_ref = &mut task.body;
+                            let model_opt = extract_model_name(task_body_ref, &task.path, &state.model_aliases);
                             let eligible: Vec<usize> = if let Some(ref model) = model_opt {
                                 online_indices.iter().cloned()
                                     .filter(|&i| backend_has_model(&backends[i].available_models, model))

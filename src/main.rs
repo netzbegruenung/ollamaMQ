@@ -45,6 +45,10 @@ struct Args {
     /// Path to users.yaml file for authentication
     #[arg(long, default_value = "/etc/ollama-mq/users.yaml")]
     users_path: String,
+
+    /// Path to model aliases YAML file (optional)
+    #[arg(long)]
+    model_aliases_path: Option<String>,
 }
 
 struct TuiState {
@@ -98,11 +102,12 @@ async fn main() {
         }
     };
 
-    let state = Arc::new(AppState::new(ollama_urls, args.timeout, registry));
+    let state = Arc::new(AppState::new(ollama_urls, args.timeout, registry, args.model_aliases_path.clone()).unwrap());
 
     // Reload the user registry on SIGHUP without restarting.
     let sighup_state = state.clone();
     let users_path = args.users_path.clone();
+    let aliases_path = args.model_aliases_path.clone();
     tokio::spawn(async move {
         let mut sig = match signal(SignalKind::hangup()) {
             Ok(s) => s,
@@ -120,6 +125,13 @@ async fn main() {
                 }
                 Err(e) => {
                     warn!("Failed to reload {} via SIGHUP: {}", users_path, e);
+                }
+            }
+            if let Some(ref path) = aliases_path {
+                if let Err(e) = sighup_state.reload_model_aliases(path) {
+                    warn!("Failed to reload model aliases from {} via SIGHUP: {}", path, e);
+                } else {
+                    info!("Model aliases reloaded from {} via SIGHUP", path);
                 }
             }
         }
