@@ -14,7 +14,7 @@ mod auth;
 mod dispatcher;
 mod tui;
 
-use crate::auth::{UserRegistry, USERS_FILE};
+use crate::auth::UserRegistry;
 use crate::dispatcher::{AppState, proxy_handler, run_worker};
 
 use std::io::IsTerminal;
@@ -41,6 +41,10 @@ struct Args {
     /// Allow all routes (enable fallback proxy)
     #[arg(long, default_value_t = false)]
     allow_all_routes: bool,
+
+    /// Path to users.yaml file for authentication
+    #[arg(long, default_value = "/etc/ollama-mq/users.yaml")]
+    users_path: String,
 }
 
 struct TuiState {
@@ -82,16 +86,14 @@ async fn main() {
             .init();
     }
 
-    // Load user registry from /etc/ollama-mq/users.yaml.
-    // An empty registry is used on failure so the server starts up, but all
-    // requests will be rejected with 401 until a valid file is in place.
-    let registry = match UserRegistry::load(USERS_FILE) {
+    // Load user registry from CLI-specified path.
+    let registry = match UserRegistry::load(&args.users_path) {
         Ok(r) => {
-            info!("Loaded user registry from {}", USERS_FILE);
+            info!("Loaded user registry from {}", args.users_path);
             r
         }
         Err(e) => {
-            warn!("Could not load {}: {}. All requests will be rejected.", USERS_FILE, e);
+            warn!("Could not load {}: {}. All requests will be rejected.", args.users_path, e);
             UserRegistry::empty()
         }
     };
@@ -100,6 +102,7 @@ async fn main() {
 
     // Reload the user registry on SIGHUP without restarting.
     let sighup_state = state.clone();
+    let users_path = args.users_path.clone();
     tokio::spawn(async move {
         let mut sig = match signal(SignalKind::hangup()) {
             Ok(s) => s,
@@ -110,13 +113,13 @@ async fn main() {
         };
         loop {
             sig.recv().await;
-            match UserRegistry::load(USERS_FILE) {
+            match UserRegistry::load(&users_path) {
                 Ok(new_registry) => {
                     *sighup_state.user_registry.lock().unwrap() = Arc::new(new_registry);
-                    info!("User registry reloaded from {} via SIGHUP", USERS_FILE);
+                    info!("User registry reloaded from {} via SIGHUP", users_path);
                 }
                 Err(e) => {
-                    warn!("Failed to reload {} via SIGHUP: {}", USERS_FILE, e);
+                    warn!("Failed to reload {} via SIGHUP: {}", users_path, e);
                 }
             }
         }

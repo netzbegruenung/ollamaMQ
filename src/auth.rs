@@ -2,8 +2,6 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
-pub const USERS_FILE: &str = "/etc/ollama-mq/users.yaml";
-
 #[derive(Deserialize)]
 struct UserEntry {
     token_hash: String,
