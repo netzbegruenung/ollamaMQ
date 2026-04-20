@@ -23,7 +23,7 @@ use crate::dispatcher::{AppState, LogBuffer, LogBufferWriter, proxy_handler, tag
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Address to bind to (e.g., 127.0.0.1:11435, 0.0.0.0:8080, or [::1]:11435)
-    #[arg(short, long, default_value = "127.0.0.1:11435")]
+    #[arg(long, default_value = "127.0.0.1:11435")]
     bind: String,
 
     /// Request timeout in seconds
@@ -87,6 +87,10 @@ where
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
+
+    // Validate bind address early
+    let addr = args.bind.parse::<SocketAddr>()
+        .expect("Invalid bind address. Use format like 127.0.0.1:11435, 0.0.0.0:8080, or [::1]:11435");
 
     // Determine if we should run TUI
     let use_tui = args.tui && std::io::stdout().is_terminal();
@@ -212,7 +216,6 @@ async fn main() {
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 1024)) // 1GB limit
         .with_state(state.clone());
 
-    let addr = format!("0.0.0.0:{}", args.port);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     info!("Dispatcher running on http://{}", addr);
 
