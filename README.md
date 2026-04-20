@@ -122,6 +122,7 @@ Point your LLM clients to the `all-llama-proxy` port (`11435`) and include the `
 
 ```bash
 curl -X POST http://localhost:11435/api/chat \
+  -H "Authorization: Bearer SECRET" \
   -H "X-User-ID: developer-1" \
   -d '{
     "model": "qwen3.5:35b",
