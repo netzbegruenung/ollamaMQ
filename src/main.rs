@@ -8,15 +8,16 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::Notify;
-use tracing::{info, warn};
+use tracing::{info, Level, warn};
 use tracing_subscriber::EnvFilter;
+use std::fmt;
 
 mod auth;
 mod dispatcher;
 mod tui;
 
 use crate::auth::UserRegistry;
-use crate::dispatcher::{AppState, LogBuffer, LogBufferWriter, proxy_handler, tags_handler, run_worker, models_handler, model_handler};
+use crate::dispatcher::{AppState, LogBuffer, LogBufferWriter, proxy_handler, tags_handler, run_worker, models_handler, model_handler, health_handler};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -55,6 +56,34 @@ struct TuiState {
     toggle_notify: Arc<Notify>,
 }
 
+struct SimpleFormatter;
+
+impl<S, N> tracing_subscriber::fmt::format::FormatEvent<S, N> for SimpleFormatter
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    N: for<'a> tracing_subscriber::fmt::format::FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &tracing_subscriber::fmt::FmtContext<'_, S, N>,
+        mut writer: tracing_subscriber::fmt::format::Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> fmt::Result {
+        let level = event.metadata().level();
+        let level_str = match *level {
+            Level::ERROR => "ERROR",
+            Level::WARN => "WARN",
+            Level::INFO => "INFO",
+            Level::DEBUG => "DEBUG",
+            Level::TRACE => "TRACE",
+        };
+        
+        write!(writer, "{}: ", level_str)?;
+        ctx.field_format().format_fields(writer.by_ref(), event)?;
+        writeln!(writer)
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
@@ -72,18 +101,17 @@ async fn main() {
         tracing_subscriber::fmt()
             .with_writer(LogBufferWriter::new(log_buffer.clone()))
             .with_ansi(false)
+            .event_format(SimpleFormatter)
             .with_env_filter(EnvFilter::new(log_level))
-            .with_level(true)
-            .with_line_number(false)
-            .compact()
             .init();
         
         Some(log_buffer)
     } else {
-        // Non-TUI mode: log to stdout with colors
+        // Non-TUI mode: log to stdout with flat format
         tracing_subscriber::fmt()
             .with_writer(std::io::stdout)
-            .with_ansi(true)
+            .with_ansi(false)
+            .event_format(SimpleFormatter)
             .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level)))
             .init();
         
@@ -155,7 +183,7 @@ async fn main() {
     });
 
     let app = Router::new()
-        .route("/health", get(|| async { "OK" }))
+        .route("/health", get(health_handler))
         .route("/", any(proxy_handler))
         .route("/api/generate", any(proxy_handler))
         .route("/api/chat", any(proxy_handler))

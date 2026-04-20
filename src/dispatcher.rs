@@ -1483,3 +1483,57 @@ pub async fn model_handler(
         ).into_response(),
     }
 }
+
+#[derive(Serialize)]
+struct HealthResponse {
+    models: HashMap<String, String>,
+}
+
+pub async fn health_handler(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+    let raw_token = match headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        Some(token) => token.to_string(),
+        None => return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
+    };
+
+    let registry = state.user_registry.lock().unwrap();
+    if registry.authenticate(&raw_token).is_none() {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+
+    let mut model_counts: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    
+    let backends = state.backends.lock().unwrap();
+    
+    for backend in backends.iter() {
+        let model_status = backend.model_status.read().unwrap();
+        
+        for (model_name, &available) in model_status.iter() {
+            let counts = model_counts.entry(model_name.clone()).or_insert_with(HashMap::new);
+            let key = if available { "up" } else { "down" };
+            *counts.entry(key.to_string()).or_insert(0) += 1;
+        }
+    }
+    
+    let mut models: HashMap<String, String> = HashMap::new();
+    for (model_name, counts) in model_counts.iter() {
+        let up_count = counts.get("up").copied().unwrap_or(0);
+        let down_count = counts.get("down").copied().unwrap_or(0);
+        let total = up_count + down_count;
+        
+        let status = if total == 0 || up_count == 0 {
+            "down"
+        } else if up_count == total {
+            "up"
+        } else {
+            "degraded"
+        };
+        
+        models.insert(model_name.clone(), status.to_string());
+    }
+    
+    (StatusCode::OK, axum::Json(HealthResponse { models })).into_response()
+}
