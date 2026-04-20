@@ -30,6 +30,10 @@
 
 Ensure you have [Rust](https://rustup.rs/) (2024 edition or later) and [Ollama](https://ollama.ai/) installed.
 
+### Download Binary
+
+Go to the [releases section](https://github.com/netzbegruenung/all-llama-proxy/releases) and fetch the latest binary. Currently only available for x86_64.
+
 ### Install from Source
 
 1. Clone the repository:
