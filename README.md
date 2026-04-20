@@ -22,6 +22,9 @@
 - **Real-Time TUI Dashboard**: Monitor backend health, active requests, queue depths, and throughput in real-time.
 - **OpenAI Compatibility**: Supports standard OpenAI-compatible endpoints.
 - **Async Architecture**: Built on `tokio` and `axum` for high concurrency.
+- **Model Aliases**: Support model aliases to map legacy model requests & allow renaming models.
+
+![Screenshot of TUI](screenshot.png)
 
 ## 🛠️ Installation
 

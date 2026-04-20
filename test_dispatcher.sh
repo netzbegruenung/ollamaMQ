@@ -2,7 +2,7 @@
 
 # Configuration
 BASE_URL="${BASE_URL:-http://localhost:11435}"
-MODEL="${MODEL:-qwen3.5:35b}"
+MODEL="${MODEL:-gpt-oss}"
 ENDPOINTS=("/api/generate" "/api/chat" "/v1/chat/completions" "/v1/completions")
 
 # Expanded list of 50 users to thoroughly test scrolling and high load
@@ -22,14 +22,15 @@ USERS=(
 echo "🚀 Starting 50-User Stress Test for all-llama-proxy..."
 echo "Target Base: $BASE_URL"
 echo "Endpoints: ${ENDPOINTS[*]}"
+echo "Model: $MODEL"
 echo "Total Potential Users: ${#USERS[@]}"
 echo "----------------------------------------"
 
 seed_users() {
-  rm ./examples/users-test.yaml
+  echo "users:" > ./examples/users-test.yaml
   for user in "${USERS[@]}"; do
-    TOKEN=$(echo -n "changeme-$user" | sha256sum)
-    echo """  - user_token: $TOKEN
+    TOKEN=$(echo -n "changeme-$user" | sha256sum | sed 's/  -//')
+    echo """  - token_hash: $TOKEN
     user_id: $user""" >> ./examples/users-test.yaml
   done
 }
@@ -51,6 +52,7 @@ send_request() {
     # Send request and capture HTTP status code + response
     response=$(curl -s -X POST "$url" \
         -H "X-User-ID: $user" \
+        -H "Authorization: Bearer changeme-$user" \
         -H "Content-Type: application/json" \
         -d "$payload")
     status_code=$? # Note: we'll use curl exit code or check response for 200
@@ -74,7 +76,7 @@ send_and_cancel() {
     # Start curl in background, wait a tiny bit, then kill it
     curl -s -X POST "$url" \
         -H "X-User-ID: $user" \
-        -H "Authorization: Bearer changeme-$user"
+        -H "Authorization: Bearer changeme-$user" \
         -H "Content-Type: application/json" \
         -d "{\"model\": \"${MODEL}\", \"prompt\": \"Canceled request $id\"}" > /dev/null &
     
@@ -99,6 +101,7 @@ send_image_request() {
     # Send request and capture HTTP status code
     response=$(curl -s -X POST "$url" \
         -H "X-User-ID: $user" \
+        -H "Authorization: Bearer changeme-$user" \
         -H "Content-Type: application/json" \
         -d "{\"model\": \"${MODEL}\", \"prompt\": \"What is in this image?\", \"images\": [\"$b64_pixel\"], \"stream\": false}")
 
@@ -109,8 +112,10 @@ send_image_request() {
     fi
 }
 
+seed_users
+
 # Check if dispatcher is reachable (using /health)
-if ! curl -s -o /dev/null "${BASE_URL}/health" --max-time 2; then
+if ! curl -s -o /dev/null "${BASE_URL}/health" --max-time 2 -H "Authorization: Bearer changeme-alice"; then
     echo "❌ Error: Dispatcher is not reachable at ${BASE_URL}"
     echo "   Please run 'docker compose up' or 'cargo run' in another terminal first."
     exit 1

@@ -1,5 +1,5 @@
 [Unit]
-Description=All-Llama-Proxy for load balancing requests to Ollama servers
+Description=all-llama-proxy for load balancing requests to Ollama servers
 After=network.target
 
 [Service]
@@ -7,7 +7,7 @@ Type=simple
 User=www-data
 Group=www-data
 ExecStart=/usr/local/bin/all-llama-proxy
-
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=10
 
