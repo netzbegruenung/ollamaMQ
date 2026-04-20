@@ -30,7 +30,6 @@ struct StateSnapshot {
     blocked_ips: HashSet<IpAddr>,
     blocked_users: HashSet<String>,
     vip_list: Vec<String>,
-    boost_user: Option<String>,
     user_ids: Vec<String>,
     backends: Vec<BackendStatus>,
     /// Maps real model name -> public display name
@@ -70,7 +69,6 @@ impl TuiDashboard {
         let blocked_ips = state.blocked_ips.lock().unwrap().clone();
         let blocked_users = state.blocked_users.lock().unwrap().clone();
         let vip_list = state.vip_user.lock().unwrap().clone();
-        let boost_user = state.boost_user.lock().unwrap().clone();
         let backends = state.backends.lock().unwrap().clone();
 
         // Build real_name -> public_name map from model config
@@ -106,7 +104,6 @@ impl TuiDashboard {
             blocked_ips,
             blocked_users,
             vip_list,
-            boost_user,
             user_ids,
             backends,
             model_public_names,
@@ -156,39 +153,6 @@ impl TuiDashboard {
                                             vip_list.retain(|u| u != &user_id);
                                         } else {
                                             vip_list.push(user_id.clone());
-                                        }
-                                        
-                                        // Clear Boost if just set VIP
-                                        {
-                                            let mut boost = state.boost_user.lock().unwrap();
-                                            if boost.as_ref() == Some(&user_id) {
-                                                *boost = None;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        KeyCode::Char('b') => {
-                            if self.active_panel == Panel::Users {
-                                if let Some(i) = self.table_state.selected() {
-                                    if i < snapshot.user_ids.len() {
-                                        let user_id = snapshot.user_ids[i].clone();
-                                        
-                                        // 1. Handle Boost: toggle on/off
-                                        {
-                                            let mut boost = state.boost_user.lock().unwrap();
-                                            if boost.as_ref() == Some(&user_id) {
-                                                *boost = None;
-                                            } else {
-                                                *boost = Some(user_id.clone());
-                                            }
-                                        }
-                                        
-                                        // 2. Clear VIP if user is currently VIP
-                                        {
-                                            let mut vip = state.vip_user.lock().unwrap();
-                                            vip.retain(|u| u != &user_id);
                                         }
                                     }
                                 }
@@ -353,9 +317,6 @@ impl TuiDashboard {
             Span::styled("Panel: ", Style::default().fg(Color::White)),
             Span::styled(if self.active_panel == Panel::Users { "USERS" } else { "BLOCKED" }, Style::default().fg(Color::Yellow).bold()),
             Span::raw(" | "),
-            Span::styled("Boost: ", Style::default().fg(Color::Yellow)),
-            Span::styled(snapshot.boost_user.clone().unwrap_or_else(|| "None".to_string()), Style::default().fg(Color::Yellow).bold()),
-            Span::raw(" | "),
             Span::styled("Q: ", Style::default().fg(Color::Yellow)),
             Span::styled((total_queued + total_processing).to_string(), Style::default().fg(Color::Yellow).bold()),
             Span::raw(" | "),
@@ -453,18 +414,15 @@ impl TuiDashboard {
             let ip_str = snapshot.user_ips.get(user).map(|i| i.to_string()).unwrap_or_default();
             let is_blocked = snapshot.blocked_users.contains(user) || snapshot.user_ips.get(user).map_or(false, |ip| snapshot.blocked_ips.contains(ip));
             let is_vip = snapshot.vip_list.contains(user);
-            let is_boost = snapshot.boost_user.as_ref() == Some(user);
 
             let (sym, style) = if is_blocked { ("✖ ", Style::default().fg(Color::Red)) }
                               else if is_vip { ("★ ", Style::default().fg(Color::Magenta)) }
-                              else if is_boost { ("⚡", Style::default().fg(Color::Yellow)) }
                               else if *snapshot.processing_counts.get(user).unwrap_or(&0) > 0 { ("▶ ", Style::default().fg(Color::Cyan)) }
                               else if *snapshot.queues_len.get(user).unwrap_or(&0) > 0 { ("● ", Style::default().fg(Color::Green)) }
                               else { ("○ ", Style::default().fg(Color::DarkGray)) };
 
-            let mut spans = vec![Span::styled(sym, style), Span::styled(user.clone(), if is_blocked { Style::default().fg(Color::Red).add_modifier(Modifier::CROSSED_OUT) } else if is_vip { Style::default().fg(Color::Magenta).bold() } else if is_boost { Style::default().fg(Color::Yellow).bold() } else { Style::default().fg(Color::White) })];
+            let mut spans = vec![Span::styled(sym, style), Span::styled(user.clone(), if is_blocked { Style::default().fg(Color::Red).add_modifier(Modifier::CROSSED_OUT) } else if is_vip { Style::default().fg(Color::Magenta).bold() } else { Style::default().fg(Color::White) })];
             if is_vip { spans.push(Span::styled(" [VIP]", Style::default().fg(Color::Magenta).bold())); }
-            if is_boost { spans.push(Span::styled(" [BST]", Style::default().fg(Color::Yellow).bold())); }
             if is_blocked { spans.push(Span::styled(" [BLOCKED]", Style::default().fg(Color::Red).bold())); }
 
             Row::new(vec![Cell::from(Line::from(spans)), Cell::from(ip_str).style(Style::default().fg(Color::Cyan)), Cell::from(queue_len.to_string()), Cell::from(processed.to_string()), Cell::from(dropped.to_string())])
@@ -484,7 +442,7 @@ impl TuiDashboard {
         let rows: Vec<Row> = snapshot.user_ids.iter().map(|user| {
             let q_len = snapshot.queues_len.get(user).unwrap_or(&0) + snapshot.processing_counts.get(user).unwrap_or(&0);
             let bar_len = if q_len > 0 { ((q_len as f32 / 20.0).min(1.0) * bar_max_width as f32) as usize } else { 0 };
-            let color = if snapshot.vip_list.contains(user) { Color::Magenta } else if snapshot.boost_user.as_ref() == Some(user) { Color::Yellow } else if *snapshot.processing_counts.get(user).unwrap_or(&0) > 0 { Color::Cyan } else { Color::Green };
+            let color = if snapshot.vip_list.contains(user) { Color::Magenta } else if *snapshot.processing_counts.get(user).unwrap_or(&0) > 0 { Color::Cyan } else { Color::Green };
             let bar = format!("{:<width$}", "⠿".repeat(bar_len), width = bar_max_width);
             let pct = if total_queued > 0 { (q_len as f64 / total_queued as f64) * 100.0 } else { 0.0 };
             Row::new(vec![Cell::from(user.clone()), Cell::from(bar).style(Style::default().fg(color)), Cell::from(format!("{} ({:.0}%)", q_len, pct)).style(Style::default().fg(color).bold())])
@@ -534,11 +492,11 @@ impl TuiDashboard {
     }
 
     fn render_help(&self) -> Paragraph<'static> {
-        Paragraph::new(" Tab: Switch | p: VIP | b: Boost | x: Block User | X: Block IP | u: Unblock | m: Models | q: Quit")
+        Paragraph::new(" Tab: Switch | p: VIP | x: Block User | X: Block IP | u: Unblock | m: Models | q: Quit")
             .block(Block::default().borders(Borders::ALL).title_bottom(Line::from(format!(" v{} ", env!("CARGO_PKG_VERSION"))).alignment(Alignment::Right)))
     }
 
     fn render_detailed_help(&self) -> Paragraph<'static> {
-        Paragraph::new("\n  VIP: 'p' | BOOST: 'b' | BLOCK: 'x' (User) / 'X' (IP) | UNBLOCK: 'u'\n  PANELS: 'Tab' | MODELS: 'm' | QUIT: 'q' or 'Esc'\n\n  ★ VIP | ⚡ Boost | ✖ Blocked | ▶ Processing | ● Queued").block(Block::default().title(" Help ").borders(Borders::ALL)).style(Style::default().fg(Color::Gray))
+        Paragraph::new("\n  VIP: 'p' | BLOCK: 'x' (User) / 'X' (IP) | UNBLOCK: 'u'\n  PANELS: 'Tab' | MODELS: 'm' | QUIT: 'q' or 'Esc'\n\n  ★ VIP | ✖ Blocked | ▶ Processing | ● Queued").block(Block::default().title(" Help ").borders(Borders::ALL)).style(Style::default().fg(Color::Gray))
     }
 }

@@ -18,7 +18,7 @@
 - **Per-User Queuing**: Each user (identified by the `X-User-ID` header) has their own FIFO queue.
 - **Fair-Share Scheduling**: Prevents any single user from monopolizing all available backends.
 - **Transparent Header Forwarding**: Full support for all HTTP headers (including `X-User-ID`) passed to and from Ollama, ensuring compatibility with tools like **Claude Code**.
-- **VIP & Boost Modes**: High priority (VIP) or increased frequency (Boost) for specific users.
+- **VIP Mode**: High priority (VIP) for specific users.
 - **Real-Time TUI Dashboard**: Monitor backend health, active requests, queue depths, and throughput in real-time.
 - **OpenAI Compatibility**: Supports standard OpenAI-compatible endpoints.
 - **Async Architecture**: Built on `tokio` and `axum` for high concurrency.
@@ -138,7 +138,6 @@ The interactive TUI dashboard provides a live view of the dispatcher's state:
 - **`j` / `k`** or **Arrows**: Navigate the user/blocked list.
 - **`Tab`** or **`h` / `l`**: Switch between the Users and Blocked panels.
 - **`p`**: Toggle **VIP** status for the selected user (priority over non-VIP users).
-- **`b`**: Toggle **Boost** status for the selected user (prioritizes every 5th request).
 - **`x`**: Block the selected user.
 - **`X`**: Block the selected user's IP address.
 - **`u`**: Unblock the selected user or IP (works in both panels).
@@ -147,7 +146,6 @@ The interactive TUI dashboard provides a live view of the dispatcher's state:
 
 **Visual Indicators:**
 - `★` (Magenta): **VIP User** (priority).
-- `⚡` (Yellow): **Boosted User** (every 5th request priority).
 - `▶` (Cyan): Request is currently being processed/streamed.
 - `●` (Green): User has requests waiting in the queue.
 - `○` (Gray): User is idle (no active or queued requests).
@@ -170,7 +168,7 @@ The interactive TUI dashboard provides a live view of the dispatcher's state:
 1. Client sends request with `X-User-ID` header.
 2. Authentication via SHA256 token hash lookup; VIP status from config (can be toggled in TUI).
 3. Request placed in user-specific FIFO queue.
-4. Worker selects next user via fair-share scheduling (VIP first, then boosted, then round-robin).
+4. Worker selects next user via fair-share scheduling (VIP first, then round-robin).
 5. Available backend selected (online, not busy, matching model config).
 6. Task spawned: request proxied to backend with transparent header passthrough.
 7. Response streamed to client; backend freed for next task.

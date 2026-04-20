@@ -460,7 +460,6 @@ pub struct AppState {
     pub blocked_ips: Mutex<HashSet<IpAddr>>,
     pub blocked_users: Mutex<HashSet<String>>,
     pub vip_user: Mutex<Vec<String>>,
-    pub boost_user: Mutex<Option<String>>,
     pub global_counter: Mutex<usize>,
     pub notify: Notify,
     pub backend_freed: Notify,
@@ -540,7 +539,6 @@ impl AppState {
             blocked_ips: Mutex::new(blocked_ips),
             blocked_users: Mutex::new(blocked_users),
             vip_user: Mutex::new(registry.get_vip_users()),
-            boost_user: Mutex::new(None),
             global_counter: Mutex::new(0),
             notify: Notify::new(),
             backend_freed: Notify::new(),
@@ -1155,7 +1153,6 @@ fn select_and_prepare_task(state: &Arc<AppState>, current_idx: &mut usize) -> Se
 
     let mut target_user = None;
     let vip_list = state.vip_user.lock().unwrap().clone();
-    let boost = state.boost_user.lock().unwrap().clone();
     let mut counter = state.global_counter.lock().unwrap();
 
     let mut active_users: Vec<String> = queues.keys()
@@ -1173,17 +1170,11 @@ fn select_and_prepare_task(state: &Arc<AppState>, current_idx: &mut usize) -> Se
         a_total.cmp(&b_total).then_with(|| a.cmp(b))
     });
 
-    // Priority: VIP users first (in order), then boost user, then round-robin
+    // Priority: VIP users first (in order), then round-robin
     for vip_user in &vip_list {
         if active_users.contains(vip_user) {
             target_user = Some(vip_user.clone());
             break;
-        }
-    }
-
-    if target_user.is_none() {
-        if let Some(ref b) = boost {
-            if active_users.contains(b) && *counter % 2 == 0 { target_user = Some(b.clone()); }
         }
     }
 
