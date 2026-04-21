@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use subtle::ConstantTimeEq;
 
 #[derive(Deserialize)]
 struct UserEntry {
@@ -22,7 +22,7 @@ struct UsersFile {
 #[derive(Clone)]
 pub struct UserRegistry {
     /// sha256_hex -> (user_id, is_vip)
-    map: HashMap<String, (String, bool)>,
+    map: Vec<(String, String, bool)>,
 }
 
 impl UserRegistry {
@@ -37,33 +37,153 @@ impl UserRegistry {
         let map = parsed
             .users
             .into_iter()
-            .map(|e| (e.token_hash.to_lowercase(), (e.user_id, e.vip)))
+            .map(|e| {
+                (
+                    e.token_hash.to_lowercase(),
+                    e.user_id,
+                    e.vip,
+                )
+            })
             .collect();
         Ok(Self { map })
     }
 
     /// Return an empty registry (all requests will be rejected).
     pub fn empty() -> Self {
-        Self {
-            map: HashMap::new(),
-        }
+        Self { map: vec![] }
     }
 
-    /// Hash `raw_token` with SHA-256 and look it up in the registry.
+    /// Hash `raw_token` with SHA-256 and look it up in the registry using
+    /// constant-time comparison to prevent timing attacks.
     ///
     /// Returns `Some(user_id)` if the token is known, `None` otherwise.
     pub fn authenticate(&self, raw_token: &str) -> Option<&str> {
         let digest = Sha256::digest(raw_token.as_bytes());
-        let hash: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
-        self.map.get(&hash).map(|(user_id, _)| user_id.as_str())
+        let hash: String = digest
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+
+        // We must check every entry regardless of whether a match occurs early,
+        // so we use constant-time comparison and accumulate the result.
+        let mut matched_user: Option<&str> = None;
+        let mut matches = 0i32;
+
+        for (stored_hash, user_id, _vip) in &self.map {
+            if stored_hash.len() == hash.len()
+                && hash.as_bytes().ct_eq(stored_hash.as_bytes()).into()
+            {
+                matches += 1;
+                // We can't break here — that would reintroduce the timing
+                // side-channel. The loop continues to scan the entire registry.
+                matched_user = Some(user_id.as_str());
+            }
+        }
+
+        if matches == 1 {
+            matched_user
+        } else {
+            None
+        }
     }
 
     /// Return a list of all VIP user IDs.
     pub fn get_vip_users(&self) -> Vec<String> {
         self.map
-            .values()
-            .filter(|(_, is_vip)| *is_vip)
-            .map(|(user_id, _)| user_id.clone())
+            .iter()
+            .filter(|(_, _, is_vip)| *is_vip)
+            .map(|(_, user_id, _)| user_id.clone())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_registry(users: Vec<(&str, &str, bool)>) -> UserRegistry {
+        UserRegistry {
+            map: users
+                .into_iter()
+                .map(|(h, u, v)| (h.to_lowercase(), u.to_string(), v))
+                .collect(),
+        }
+    }
+
+    fn sha256_hex(s: &str) -> String {
+        let digest = Sha256::digest(s.as_bytes());
+        digest.iter().map(|b| format!("{:02x}", b)).collect()
+    }
+
+    #[test]
+    fn known_token_matches() {
+        let registry = make_registry(vec![
+            (sha256_hex("").as_str(), "alice", false),
+        ]);
+        let result = registry.authenticate("");
+        assert_eq!(result, Some("alice"));
+    }
+
+    #[test]
+    fn unknown_token_rejected() {
+        let registry = make_registry(vec![
+            (sha256_hex("").as_str(), "alice", false),
+        ]);
+        let result = registry.authenticate("wrong-token");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn case_insensitive_hash() {
+        let registry = make_registry(vec![
+            (sha256_hex("").to_uppercase().as_str(), "alice", false),
+        ]);
+        let result = registry.authenticate("");
+        assert_eq!(result, Some("alice"));
+    }
+
+    #[test]
+    fn empty_registry_rejects_all() {
+        let registry = UserRegistry::empty();
+        let result = registry.authenticate("any-token");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn empty_list_rejects_all() {
+        let registry = make_registry(vec![]);
+        let result = registry.authenticate("any-token");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn multiple_users_only_one_match() {
+        let registry = make_registry(vec![
+            (sha256_hex("alice-token").as_str(), "alice", false),
+            (sha256_hex("bob-token").as_str(), "bob", false),
+            (sha256_hex("charlie-token").as_str(), "charlie", true),
+        ]);
+        let result = registry.authenticate("bob-token");
+        assert_eq!(result, Some("bob"));
+    }
+
+    #[test]
+    fn vip_users_returned() {
+        let registry = make_registry(vec![
+            (sha256_hex("alice-token").as_str(), "alice", false),
+            (sha256_hex("bob-token").as_str(), "bob", true),
+            (sha256_hex("charlie-token").as_str(), "charlie", true),
+        ]);
+        let vip = registry.get_vip_users();
+        assert_eq!(vip.len(), 2);
+        assert!(vip.contains(&"bob".to_string()));
+        assert!(vip.contains(&"charlie".to_string()));
+    }
+
+    #[test]
+    fn no_users_vip_returns_empty() {
+        let registry = make_registry(vec![]);
+        let vip = registry.get_vip_users();
+        assert!(vip.is_empty());
     }
 }
