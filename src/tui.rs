@@ -397,10 +397,25 @@ async fn main() {
     let mut needs_redraw = true;
     let mut tick = tokio::time::interval(Duration::from_millis(16));
 
-    enable_raw_mode().unwrap();
-    io::stdout().execute(EnterAlternateScreen).unwrap();
-    let mut terminal = Terminal::new(CrosstermBackend::<io::Stdout>::new(io::stdout())).unwrap();
-    terminal.clear().unwrap();
+    if let Err(e) = enable_raw_mode() {
+        eprintln!("ERROR: Failed to enable raw mode: {}", e);
+        return;
+    }
+
+    if let Err(e) = io::stdout().execute(EnterAlternateScreen) {
+        eprintln!("ERROR: Failed to enter alternate screen: {}", e);
+        disable_raw_mode().ok();
+        return;
+    }
+
+    let mut terminal = match Terminal::new(CrosstermBackend::<io::Stdout>::new(io::stdout())) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("ERROR: Failed to initialize terminal: {}", e);
+            disable_raw_mode().ok();
+            return;
+        }
+    };
 
     loop {
         tokio::select! {
@@ -413,9 +428,9 @@ async fn main() {
                 needs_redraw = true;
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => {
-                        io::stdout().execute(LeaveAlternateScreen).unwrap();
-                        disable_raw_mode().unwrap();
-                        terminal.show_cursor().unwrap();
+                        io::stdout().execute(LeaveAlternateScreen).ok();
+                        disable_raw_mode().ok();
+                        terminal.show_cursor().ok();
                         return;
                     }
                     KeyCode::Char('?') => dashboard.show_help = !dashboard.show_help,
@@ -543,16 +558,23 @@ async fn main() {
             // Arm 3: render tick (~60 fps) — only draw when something changed
             _ = tick.tick() => {
                 if needs_redraw {
-                    terminal.draw(|f| dashboard.render(f, &state)).unwrap();
+                    if terminal.draw(|f| dashboard.render(f, &state)).is_err() {
+                        eprintln!("ERROR: Failed to render terminal UI");
+                        break;
+                    }
                     needs_redraw = false;
                 }
             }
 
             // Arm 4: outgoing command to server
             Some(cmd) = cmd_rx.recv() => {
-                let buf = encode(&cmd)
-                    .map_err(|_| io::Error::new(io::ErrorKind::Other, "encode error"))
-                    .unwrap();
+                let buf = match encode(&cmd) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("ERROR: Failed to encode command: {}", e);
+                        break;
+                    }
+                };
                 if wire_writer.write_all(&buf).await.is_err() {
                     eprintln!("Failed to send command");
                     break;
@@ -561,9 +583,13 @@ async fn main() {
         }
     }
 
+    cleanup_terminal();
+}
+
+fn cleanup_terminal() {
     io::stdout().execute(LeaveAlternateScreen).ok();
-    disable_raw_mode().ok();
-    let _ = terminal.show_cursor();
+    crossterm::terminal::disable_raw_mode().ok();
+    io::stdout().execute(crossterm::cursor::Show).ok();
 }
 
 

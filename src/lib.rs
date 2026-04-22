@@ -2,6 +2,7 @@ pub mod protocol;
 pub mod auth;
 pub mod dispatcher;
 pub mod dashboard_server;
+pub mod utils;
 
 pub use protocol::{encode, decode, consumed_len, DashboardCmd, DashboardSnapshot, BackendSnapshot};
 pub use auth::UserRegistry;

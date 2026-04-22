@@ -8,6 +8,7 @@ use axum::{
 };
 use clap::Parser;
 use std::net::SocketAddr;
+use all_llama_proxy::utils::LockExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::signal::unix::{signal, SignalKind};
@@ -73,7 +74,11 @@ async fn main() {
     let args = Args::parse();
 
     let addr = args.bind.parse::<SocketAddr>()
-        .expect("Invalid bind address. Use format like 127.0.0.1:11435, 0.0.0.0:8080, or [::1]:11435");
+        .unwrap_or_else(|_| {
+            eprintln!("ERROR: Invalid bind address: {:?}", args.bind);
+            eprintln!("Use format like: 127.0.0.1:11435, 0.0.0.0:8080, or [::1]:11435");
+            std::process::exit(1);
+        });
 
     let log_level = if args.debug { "debug" } else { "info" };
 
@@ -110,7 +115,12 @@ async fn main() {
         log_buffer_clone,
         args.ip_header,
         10,
-    ).expect("Failed to load model configuration"));
+    ).unwrap_or_else(|e| {
+        eprintln!("ERROR: Failed to load model configuration");
+        eprintln!("Details: {}", e);
+        eprintln!("Check {} for correct YAML syntax", args.model_config_path);
+        std::process::exit(1);
+    }));
 
     let sighup_state = state.clone();
     let users_path = args.users_path.clone();
@@ -128,8 +138,8 @@ async fn main() {
             match UserRegistry::load(&users_path) {
                 Ok(new_registry) => {
                     let new_registry_arc = Arc::new(new_registry.clone());
-                    *sighup_state.user_registry.lock().unwrap() = new_registry_arc.clone();
-                    *sighup_state.vip_user.lock().unwrap() = new_registry_arc.get_vip_users();
+                    *sighup_state.user_registry.lock().lock_unwrap("user_registry") = new_registry_arc.clone();
+                    *sighup_state.vip_user.lock().lock_unwrap("vip_user") = new_registry_arc.get_vip_users();
                     info!("User registry reloaded from {} via SIGHUP", users_path);
                 }
                 Err(e) => {
@@ -180,7 +190,13 @@ async fn main() {
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 1024))
         .with_state(state.clone());
 
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("ERROR: Failed to bind to {}", addr);
+            eprintln!("Possibly already in use? Error: {}", e);
+            std::process::exit(1);
+        });
     info!("Dispatcher running on http://{}", addr);
 
     if let Ok(Some(dashboard_server)) = DashboardServer::from_systemd() {
@@ -214,5 +230,8 @@ async fn main() {
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await
-    .unwrap();
+    .unwrap_or_else(|e| {
+        eprintln!("ERROR: Server failed: {}", e);
+        std::process::exit(1);
+    });
 }
