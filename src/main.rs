@@ -1,20 +1,20 @@
+use all_llama_proxy::utils::LockExt;
 use all_llama_proxy::{
-    DashboardServer, UserRegistry, AppState, LogBuffer, LogBufferWriter,
-    proxy_handler, tags_handler, models_handler, model_handler, health_handler, run_worker,
+    AppState, DashboardServer, LogBuffer, LogBufferWriter, UserRegistry, health_handler,
+    model_handler, models_handler, proxy_handler, run_worker, tags_handler,
 };
 use axum::{
     Router,
     routing::{any, get},
 };
 use clap::Parser;
+use std::fmt;
 use std::net::SocketAddr;
-use all_llama_proxy::utils::LockExt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
-use std::fmt;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -73,12 +73,11 @@ where
 async fn main() {
     let args = Args::parse();
 
-    let addr = args.bind.parse::<SocketAddr>()
-        .unwrap_or_else(|_| {
-            eprintln!("ERROR: Invalid bind address: {:?}", args.bind);
-            eprintln!("Use format like: 127.0.0.1:11435, 0.0.0.0:8080, or [::1]:11435");
-            std::process::exit(1);
-        });
+    let addr = args.bind.parse::<SocketAddr>().unwrap_or_else(|_| {
+        eprintln!("ERROR: Invalid bind address: {:?}", args.bind);
+        eprintln!("Use format like: 127.0.0.1:11435, 0.0.0.0:8080, or [::1]:11435");
+        std::process::exit(1);
+    });
 
     let log_level = if args.debug { "debug" } else { "info" };
 
@@ -101,26 +100,32 @@ async fn main() {
             r
         }
         Err(e) => {
-            warn!("Could not load {}: {}. All requests will be rejected.", args.users_path, e);
+            warn!(
+                "Could not load {}: {}. All requests will be rejected.",
+                args.users_path, e
+            );
             UserRegistry::empty()
         }
     };
 
     let log_buffer_clone = log_buffer.clone();
-    let state = Arc::new(AppState::new(
-        args.model_config_path.clone(),
-        args.timeout,
-        registry,
-        args.debug,
-        log_buffer_clone,
-        args.ip_header,
-        10,
-    ).unwrap_or_else(|e| {
-        eprintln!("ERROR: Failed to load model configuration");
-        eprintln!("Details: {}", e);
-        eprintln!("Check {} for correct YAML syntax", args.model_config_path);
-        std::process::exit(1);
-    }));
+    let state = Arc::new(
+        AppState::new(
+            args.model_config_path.clone(),
+            args.timeout,
+            registry,
+            args.debug,
+            log_buffer_clone,
+            args.ip_header,
+            10,
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("ERROR: Failed to load model configuration");
+            eprintln!("Details: {}", e);
+            eprintln!("Check {} for correct YAML syntax", args.model_config_path);
+            std::process::exit(1);
+        }),
+    );
 
     let sighup_state = state.clone();
     let users_path = args.users_path.clone();
@@ -138,8 +143,12 @@ async fn main() {
             match UserRegistry::load(&users_path) {
                 Ok(new_registry) => {
                     let new_registry_arc = Arc::new(new_registry.clone());
-                    *sighup_state.user_registry.lock().lock_unwrap("user_registry") = new_registry_arc.clone();
-                    *sighup_state.vip_user.lock().lock_unwrap("vip_user") = new_registry_arc.get_vip_users();
+                    *sighup_state
+                        .user_registry
+                        .lock()
+                        .lock_unwrap("user_registry") = new_registry_arc.clone();
+                    *sighup_state.vip_user.lock().lock_unwrap("vip_user") =
+                        new_registry_arc.get_vip_users();
                     info!("User registry reloaded from {} via SIGHUP", users_path);
                 }
                 Err(e) => {
@@ -147,7 +156,10 @@ async fn main() {
                 }
             }
             if let Err(e) = sighup_state.reload_model_config(&config_path) {
-                eprintln!("ERROR: Failed to reload model config from {}: {}", config_path, e);
+                eprintln!(
+                    "ERROR: Failed to reload model config from {}: {}",
+                    config_path, e
+                );
                 eprintln!("Continuing with existing configuration");
             } else {
                 info!("Model config reloaded from {} via SIGHUP", config_path);

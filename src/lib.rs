@@ -1,13 +1,15 @@
-pub mod protocol;
 pub mod auth;
-pub mod dispatcher;
 pub mod dashboard_server;
+pub mod dispatcher;
+pub mod protocol;
 pub mod utils;
 
-pub use protocol::{encode, decode, consumed_len, DashboardCmd, DashboardSnapshot, BackendSnapshot};
 pub use auth::UserRegistry;
-pub use dispatcher::{
-    AppState, LogBuffer, LogBufferWriter, proxy_handler, tags_handler, models_handler,
-    model_handler, health_handler, run_worker,
-};
 pub use dashboard_server::DashboardServer;
+pub use dispatcher::{
+    AppState, LogBuffer, LogBufferWriter, health_handler, model_handler, models_handler,
+    proxy_handler, run_worker, tags_handler,
+};
+pub use protocol::{
+    BackendSnapshot, DashboardCmd, DashboardSnapshot, consumed_len, decode, encode,
+};

@@ -1,8 +1,9 @@
-use all_llama_proxy::{encode, decode, consumed_len, DashboardCmd, DashboardSnapshot};
+use all_llama_proxy::{DashboardCmd, DashboardSnapshot, consumed_len, decode, encode};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::time::Duration;
 
+use clap::Parser;
 use crossterm::{
     ExecutableCommand,
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
@@ -18,7 +19,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tracing::info;
-use clap::Parser;
 
 #[derive(Clone, PartialEq)]
 enum CurrentPanel {
@@ -69,7 +69,11 @@ impl TuiDashboard {
                 Constraint::Min(4),
                 Constraint::Length(6),
                 Constraint::Length(3),
-                if self.show_help { Constraint::Length(12) } else { Constraint::Length(0) },
+                if self.show_help {
+                    Constraint::Length(12)
+                } else {
+                    Constraint::Length(0)
+                },
             ])
             .split(area);
 
@@ -85,15 +89,27 @@ impl TuiDashboard {
             .split(main_chunks[1]);
 
         f.render_widget(self.render_backends(snapshot), content_chunks[0]);
-        f.render_stateful_widget(self.render_users(snapshot), content_chunks[1], &mut self.table_state);
+        f.render_stateful_widget(
+            self.render_users(snapshot),
+            content_chunks[1],
+            &mut self.table_state,
+        );
 
         let right_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(content_chunks[2]);
 
-        f.render_stateful_widget(self.render_queues(snapshot, right_chunks[0].width), right_chunks[0], &mut self.table_state);
-        f.render_stateful_widget(self.render_blocked(snapshot), right_chunks[1], &mut self.blocked_table_state);
+        f.render_stateful_widget(
+            self.render_queues(snapshot, right_chunks[0].width),
+            right_chunks[0],
+            &mut self.table_state,
+        );
+        f.render_stateful_widget(
+            self.render_blocked(snapshot),
+            right_chunks[1],
+            &mut self.blocked_table_state,
+        );
 
         f.render_widget(self.render_logs(snapshot), main_chunks[2]);
         f.render_widget(self.render_help(), main_chunks[3]);
@@ -112,197 +128,380 @@ impl TuiDashboard {
             Span::styled(" all-llama-proxy ", Style::default().fg(Color::Cyan).bold()),
             Span::raw(" | "),
             Span::styled("Panel: ", Style::default().fg(Color::White)),
-            Span::styled(if self.active_panel == CurrentPanel::Users { "USERS" } else { "BLOCKED" }, Style::default().fg(Color::Yellow).bold()),
+            Span::styled(
+                if self.active_panel == CurrentPanel::Users {
+                    "USERS"
+                } else {
+                    "BLOCKED"
+                },
+                Style::default().fg(Color::Yellow).bold(),
+            ),
             Span::raw(" | "),
             Span::styled("Q: ", Style::default().fg(Color::Yellow)),
-            Span::styled((total_queued + total_processing).to_string(), Style::default().fg(Color::Yellow).bold()),
+            Span::styled(
+                (total_queued + total_processing).to_string(),
+                Style::default().fg(Color::Yellow).bold(),
+            ),
             Span::raw(" | "),
             Span::styled("Done: ", Style::default().fg(Color::Green)),
-            Span::styled(total_processed.to_string(), Style::default().fg(Color::Green).bold()),
+            Span::styled(
+                total_processed.to_string(),
+                Style::default().fg(Color::Green).bold(),
+            ),
             Span::raw(" | "),
             Span::styled("Drop: ", Style::default().fg(Color::Red)),
-            Span::styled(total_dropped.to_string(), Style::default().fg(Color::Red).bold()),
+            Span::styled(
+                total_dropped.to_string(),
+                Style::default().fg(Color::Red).bold(),
+            ),
         ];
 
         Paragraph::new(Line::from(stats_line)).block(Block::default().borders(Borders::ALL))
     }
 
     fn render_backends(&self, snapshot: &DashboardSnapshot) -> Table<'static> {
-        let rows: Vec<Row> = snapshot.backends.iter().flat_map(|b| {
-            let url = b.url.replace("http://", "").replace("https://", "");
+        let rows: Vec<Row> = snapshot
+            .backends
+            .iter()
+            .flat_map(|b| {
+                let url = b.url.replace("http://", "").replace("https://", "");
 
-            let (status_sym, status_style) = if b.is_online {
-                ("● ", Style::default().fg(Color::Green))
-            } else {
-                ("○ ", Style::default().fg(Color::Red))
-            };
-
-            let req_style = if b.active_requests > 0 {
-                Style::default().fg(Color::Cyan).bold()
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-
-            let header_row = Row::new(vec![
-                Cell::from(Line::from(vec![
-                    Span::styled(status_sym, status_style),
-                    Span::styled(url, if b.is_online { Style::default().fg(Color::White) } else { Style::default().fg(Color::DarkGray).add_modifier(Modifier::CROSSED_OUT) }),
-                ])),
-                Cell::from(b.active_requests.to_string()).style(req_style),
-                Cell::from(b.processed_count.to_string()).style(Style::default().fg(Color::DarkGray)),
-            ]);
-
-            let mut rows = vec![header_row];
-
-            if self.show_models {
-                if b.configured_models.is_empty() {
-                    rows.push(Row::new(vec![
-                        Cell::from("  (no models)").style(Style::default().fg(Color::DarkGray)),
-                        Cell::from(""),
-                        Cell::from(""),
-                    ]));
+                let (status_sym, status_style) = if b.is_online {
+                    ("● ", Style::default().fg(Color::Green))
                 } else {
-                    for model in &b.configured_models {
-                        let available = b.model_status.get(model).copied().unwrap_or(true);
-                        let (sym, style) = if available {
-                            ("✓", Style::default().fg(Color::Green))
-                        } else {
-                            ("✗", Style::default().fg(Color::Red))
-                        };
-                        let display_name = snapshot.model_public_names
-                            .get(model)
-                            .cloned()
-                            .unwrap_or_else(|| model.clone());
+                    ("○ ", Style::default().fg(Color::Red))
+                };
+
+                let req_style = if b.active_requests > 0 {
+                    Style::default().fg(Color::Cyan).bold()
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+
+                let header_row = Row::new(vec![
+                    Cell::from(Line::from(vec![
+                        Span::styled(status_sym, status_style),
+                        Span::styled(
+                            url,
+                            if b.is_online {
+                                Style::default().fg(Color::White)
+                            } else {
+                                Style::default()
+                                    .fg(Color::DarkGray)
+                                    .add_modifier(Modifier::CROSSED_OUT)
+                            },
+                        ),
+                    ])),
+                    Cell::from(b.active_requests.to_string()).style(req_style),
+                    Cell::from(b.processed_count.to_string())
+                        .style(Style::default().fg(Color::DarkGray)),
+                ]);
+
+                let mut rows = vec![header_row];
+
+                if self.show_models {
+                    if b.configured_models.is_empty() {
                         rows.push(Row::new(vec![
-                            Cell::from(format!("  {} {}", sym, display_name)).style(style),
+                            Cell::from("  (no models)").style(Style::default().fg(Color::DarkGray)),
                             Cell::from(""),
                             Cell::from(""),
                         ]));
+                    } else {
+                        for model in &b.configured_models {
+                            let available = b.model_status.get(model).copied().unwrap_or(true);
+                            let (sym, style) = if available {
+                                ("✓", Style::default().fg(Color::Green))
+                            } else {
+                                ("✗", Style::default().fg(Color::Red))
+                            };
+                            let display_name = snapshot
+                                .model_public_names
+                                .get(model)
+                                .cloned()
+                                .unwrap_or_else(|| model.clone());
+                            rows.push(Row::new(vec![
+                                Cell::from(format!("  {} {}", sym, display_name)).style(style),
+                                Cell::from(""),
+                                Cell::from(""),
+                            ]));
+                        }
                     }
                 }
-            }
 
-            rows
-        }).collect();
+                rows
+            })
+            .collect();
 
-        Table::new(rows, [
-            Constraint::Min(10),
-            Constraint::Length(4),
-            Constraint::Length(6),
-        ])
-        .header(Row::new(vec!["Backend", "Act", "Done"]).style(Style::default().fg(Color::Yellow).bold()).bottom_margin(1))
-        .block(Block::default().title(" Ollama Instances ").borders(Borders::ALL))
+        Table::new(
+            rows,
+            [
+                Constraint::Min(10),
+                Constraint::Length(4),
+                Constraint::Length(6),
+            ],
+        )
+        .header(
+            Row::new(vec!["Backend", "Act", "Done"])
+                .style(Style::default().fg(Color::Yellow).bold())
+                .bottom_margin(1),
+        )
+        .block(
+            Block::default()
+                .title(" Ollama Instances ")
+                .borders(Borders::ALL),
+        )
     }
 
     fn render_users(&self, snapshot: &DashboardSnapshot) -> Table<'static> {
-        let rows: Vec<Row> = snapshot.user_ids.iter().map(|user| {
-            let queue_len = snapshot.queues_len.get(user).unwrap_or(&0) + snapshot.processing_counts.get(user).unwrap_or(&0);
-            let processed = snapshot.processed_counts.get(user).unwrap_or(&0);
-            let dropped = snapshot.dropped_counts.get(user).unwrap_or(&0);
-            let ip_str = snapshot.user_ips.get(user).cloned().unwrap_or_default();
-            let ip_ref = snapshot.user_ips.get(user).map(|s| s.as_str()).unwrap_or("");
-            let is_blocked = snapshot.blocked_users.contains(user.as_str()) || snapshot.blocked_ips.contains(ip_ref);
-            let is_vip = snapshot.vip_list.contains(user);
+        let rows: Vec<Row> = snapshot
+            .user_ids
+            .iter()
+            .map(|user| {
+                let queue_len = snapshot.queues_len.get(user).unwrap_or(&0)
+                    + snapshot.processing_counts.get(user).unwrap_or(&0);
+                let processed = snapshot.processed_counts.get(user).unwrap_or(&0);
+                let dropped = snapshot.dropped_counts.get(user).unwrap_or(&0);
+                let ip_str = snapshot.user_ips.get(user).cloned().unwrap_or_default();
+                let ip_ref = snapshot
+                    .user_ips
+                    .get(user)
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                let is_blocked = snapshot.blocked_users.contains(user.as_str())
+                    || snapshot.blocked_ips.contains(ip_ref);
+                let is_vip = snapshot.vip_list.contains(user);
 
-            let (sym, style) = if is_blocked { ("✖ ", Style::default().fg(Color::Red)) }
-                              else if is_vip { ("★ ", Style::default().fg(Color::Magenta)) }
-                              else if *snapshot.processing_counts.get(user).unwrap_or(&0) > 0 { ("▶ ", Style::default().fg(Color::Cyan)) }
-                              else if *snapshot.queues_len.get(user).unwrap_or(&0) > 0 { ("● ", Style::default().fg(Color::Green)) }
-                              else { ("○ ", Style::default().fg(Color::DarkGray)) };
+                let (sym, style) = if is_blocked {
+                    ("✖ ", Style::default().fg(Color::Red))
+                } else if is_vip {
+                    ("★ ", Style::default().fg(Color::Magenta))
+                } else if *snapshot.processing_counts.get(user).unwrap_or(&0) > 0 {
+                    ("▶ ", Style::default().fg(Color::Cyan))
+                } else if *snapshot.queues_len.get(user).unwrap_or(&0) > 0 {
+                    ("● ", Style::default().fg(Color::Green))
+                } else {
+                    ("○ ", Style::default().fg(Color::DarkGray))
+                };
 
-            let user_style = if is_blocked { Style::default().fg(Color::Red).add_modifier(Modifier::CROSSED_OUT) }
-                            else if is_vip { Style::default().fg(Color::Magenta).bold() }
-                            else { Style::default().fg(Color::White) };
+                let user_style = if is_blocked {
+                    Style::default()
+                        .fg(Color::Red)
+                        .add_modifier(Modifier::CROSSED_OUT)
+                } else if is_vip {
+                    Style::default().fg(Color::Magenta).bold()
+                } else {
+                    Style::default().fg(Color::White)
+                };
 
-            let mut spans = vec![Span::styled(sym, style), Span::styled(user.clone(), user_style)];
-            if is_vip { spans.push(Span::styled(" [VIP]", Style::default().fg(Color::Magenta).bold())); }
-            if is_blocked { spans.push(Span::styled(" [BLOCKED]", Style::default().fg(Color::Red).bold())); }
+                let mut spans = vec![
+                    Span::styled(sym, style),
+                    Span::styled(user.clone(), user_style),
+                ];
+                if is_vip {
+                    spans.push(Span::styled(
+                        " [VIP]",
+                        Style::default().fg(Color::Magenta).bold(),
+                    ));
+                }
+                if is_blocked {
+                    spans.push(Span::styled(
+                        " [BLOCKED]",
+                        Style::default().fg(Color::Red).bold(),
+                    ));
+                }
 
-            Row::new(vec![
-                Cell::from(Line::from(spans)),
-                Cell::from(ip_str).style(Style::default().fg(Color::Cyan)),
-                Cell::from(queue_len.to_string()),
-                Cell::from(processed.to_string()),
-                Cell::from(dropped.to_string()),
-            ])
-        }).collect();
+                Row::new(vec![
+                    Cell::from(Line::from(spans)),
+                    Cell::from(ip_str).style(Style::default().fg(Color::Cyan)),
+                    Cell::from(queue_len.to_string()),
+                    Cell::from(processed.to_string()),
+                    Cell::from(dropped.to_string()),
+                ])
+            })
+            .collect();
 
-        Table::new(rows, [Constraint::Percentage(45), Constraint::Percentage(25), Constraint::Percentage(10), Constraint::Percentage(10), Constraint::Percentage(10)])
-            .header(Row::new(vec!["User ID", "Last IP", "Q", "Done", "Drop"]).style(Style::default().fg(Color::Yellow).bold()).bottom_margin(1))
-            .row_highlight_style(Style::default().bg(Color::Rgb(40, 40, 40)).add_modifier(Modifier::BOLD))
-            .highlight_symbol(">> ")
-            .block(Block::default().title(" Active Users ").borders(Borders::ALL).border_style(if self.active_panel == CurrentPanel::Users { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::DarkGray) }))
+        Table::new(
+            rows,
+            [
+                Constraint::Percentage(45),
+                Constraint::Percentage(25),
+                Constraint::Percentage(10),
+                Constraint::Percentage(10),
+                Constraint::Percentage(10),
+            ],
+        )
+        .header(
+            Row::new(vec!["User ID", "Last IP", "Q", "Done", "Drop"])
+                .style(Style::default().fg(Color::Yellow).bold())
+                .bottom_margin(1),
+        )
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::Rgb(40, 40, 40))
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ")
+        .block(
+            Block::default()
+                .title(" Active Users ")
+                .borders(Borders::ALL)
+                .border_style(if self.active_panel == CurrentPanel::Users {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                }),
+        )
     }
 
     fn render_queues(&self, snapshot: &DashboardSnapshot, available_width: u16) -> Table<'static> {
-        let total_queued = snapshot.queues_len.values().sum::<usize>() + snapshot.processing_counts.values().sum::<usize>();
+        let total_queued = snapshot.queues_len.values().sum::<usize>()
+            + snapshot.processing_counts.values().sum::<usize>();
         let bar_max_width = ((available_width as f32) * 0.45) as usize;
 
-        let rows: Vec<Row> = snapshot.user_ids.iter().map(|user| {
-            let q_len = snapshot.queues_len.get(user).unwrap_or(&0) + snapshot.processing_counts.get(user).unwrap_or(&0);
-            let bar_len = if q_len > 0 { ((q_len as f32 / 20.0).min(1.0) * bar_max_width as f32) as usize } else { 0 };
-            let color = if snapshot.vip_list.contains(user) { Color::Magenta }
-                        else if *snapshot.processing_counts.get(user).unwrap_or(&0) > 0 { Color::Cyan }
-                        else { Color::Green };
-            let bar = format!("{:<width$}", "⠿".repeat(bar_len), width = bar_max_width);
-            let pct = if total_queued > 0 { (q_len as f64 / total_queued as f64) * 100.0 } else { 0.0 };
-            Row::new(vec![
-                Cell::from(user.clone()),
-                Cell::from(bar).style(Style::default().fg(color)),
-                Cell::from(format!("{} ({:.0}%)", q_len, pct)).style(Style::default().fg(color).bold())
-            ])
-        }).collect();
+        let rows: Vec<Row> = snapshot
+            .user_ids
+            .iter()
+            .map(|user| {
+                let q_len = snapshot.queues_len.get(user).unwrap_or(&0)
+                    + snapshot.processing_counts.get(user).unwrap_or(&0);
+                let bar_len = if q_len > 0 {
+                    ((q_len as f32 / 20.0).min(1.0) * bar_max_width as f32) as usize
+                } else {
+                    0
+                };
+                let color = if snapshot.vip_list.contains(user) {
+                    Color::Magenta
+                } else if *snapshot.processing_counts.get(user).unwrap_or(&0) > 0 {
+                    Color::Cyan
+                } else {
+                    Color::Green
+                };
+                let bar = format!("{:<width$}", "⠿".repeat(bar_len), width = bar_max_width);
+                let pct = if total_queued > 0 {
+                    (q_len as f64 / total_queued as f64) * 100.0
+                } else {
+                    0.0
+                };
+                Row::new(vec![
+                    Cell::from(user.clone()),
+                    Cell::from(bar).style(Style::default().fg(color)),
+                    Cell::from(format!("{} ({:.0}%)", q_len, pct))
+                        .style(Style::default().fg(color).bold()),
+                ])
+            })
+            .collect();
 
-        Table::new(rows, [Constraint::Percentage(30), Constraint::Percentage(45), Constraint::Percentage(25)])
-            .header(Row::new(vec!["User ID", "Progress", "Num"]).style(Style::default().fg(Color::Yellow).bold()).bottom_margin(1))
-            .row_highlight_style(Style::default().bg(Color::Rgb(40, 40, 40)).add_modifier(Modifier::BOLD))
-            .highlight_symbol(">> ")
-            .block(Block::default().title(" Queue Status ").borders(Borders::ALL))
+        Table::new(
+            rows,
+            [
+                Constraint::Percentage(30),
+                Constraint::Percentage(45),
+                Constraint::Percentage(25),
+            ],
+        )
+        .header(
+            Row::new(vec!["User ID", "Progress", "Num"])
+                .style(Style::default().fg(Color::Yellow).bold())
+                .bottom_margin(1),
+        )
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::Rgb(40, 40, 40))
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ")
+        .block(
+            Block::default()
+                .title(" Queue Status ")
+                .borders(Borders::ALL),
+        )
     }
 
     fn render_blocked(&self, snapshot: &DashboardSnapshot) -> Table<'static> {
         let mut items = Vec::new();
-        for ip in snapshot.blocked_ips.iter() { items.push(("IP", ip.clone())); }
-        for user in snapshot.blocked_users.iter() { items.push(("USER", user.clone())); }
+        for ip in snapshot.blocked_ips.iter() {
+            items.push(("IP", ip.clone()));
+        }
+        for user in snapshot.blocked_users.iter() {
+            items.push(("USER", user.clone()));
+        }
         items.sort_by(|a, b| a.1.cmp(&b.1));
 
-        let rows: Vec<Row> = items.iter().map(|(kind, val)| {
-            Row::new(vec![
-                Cell::from(kind.to_string()).style(if *kind == "IP" { Style::default().fg(Color::Cyan) } else { Style::default().fg(Color::Magenta) }),
-                Cell::from(val.clone()),
-            ])
-        }).collect();
+        let rows: Vec<Row> = items
+            .iter()
+            .map(|(kind, val)| {
+                Row::new(vec![
+                    Cell::from(kind.to_string()).style(if *kind == "IP" {
+                        Style::default().fg(Color::Cyan)
+                    } else {
+                        Style::default().fg(Color::Magenta)
+                    }),
+                    Cell::from(val.clone()),
+                ])
+            })
+            .collect();
 
-        Table::new(rows, [Constraint::Percentage(30), Constraint::Percentage(70)])
-            .header(Row::new(vec!["Type", "Value"]).style(Style::default().fg(Color::Yellow).bold()).bottom_margin(1))
-            .row_highlight_style(Style::default().bg(Color::Rgb(40, 40, 40)).add_modifier(Modifier::BOLD))
-            .highlight_symbol(">> ")
-            .block(Block::default().title(" Blocked Items ").borders(Borders::ALL).border_style(if self.active_panel == CurrentPanel::Blocked { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::DarkGray) }))
+        Table::new(
+            rows,
+            [Constraint::Percentage(30), Constraint::Percentage(70)],
+        )
+        .header(
+            Row::new(vec!["Type", "Value"])
+                .style(Style::default().fg(Color::Yellow).bold())
+                .bottom_margin(1),
+        )
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::Rgb(40, 40, 40))
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ")
+        .block(
+            Block::default()
+                .title(" Blocked Items ")
+                .borders(Borders::ALL)
+                .border_style(if self.active_panel == CurrentPanel::Blocked {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                }),
+        )
     }
 
     fn render_logs(&self, snapshot: &DashboardSnapshot) -> Paragraph<'static> {
-        let logs: Vec<Line> = snapshot.log_lines.iter().map(|(level, ts, msg)| {
-            let color = match level.as_str() {
-                "DEBUG" => Color::Blue,
-                "INFO"  => Color::White,
-                "WARN"  => Color::Yellow,
-                "ERROR" => Color::Red,
-                _       => Color::Gray,
-            };
-            let time_str = format!(
-                "{}",
-                chrono::DateTime::from_timestamp(*ts, 0)
-                    .unwrap_or(chrono::DateTime::UNIX_EPOCH)
-                    .format("%H:%M")
-            );
-            Line::from(vec![
-                Span::styled(format!("{} ", time_str), Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{:<5} ", level), Style::default().fg(color).bold()),
-                Span::styled(msg.clone(), Style::default().fg(color)),
-            ])
-        }).collect();
+        let logs: Vec<Line> = snapshot
+            .log_lines
+            .iter()
+            .map(|(level, ts, msg)| {
+                let color = match level.as_str() {
+                    "DEBUG" => Color::Blue,
+                    "INFO" => Color::White,
+                    "WARN" => Color::Yellow,
+                    "ERROR" => Color::Red,
+                    _ => Color::Gray,
+                };
+                let time_str = format!(
+                    "{}",
+                    chrono::DateTime::from_timestamp(*ts, 0)
+                        .unwrap_or(chrono::DateTime::UNIX_EPOCH)
+                        .format("%H:%M")
+                );
+                Line::from(vec![
+                    Span::styled(
+                        format!("{} ", time_str),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(format!("{:<5} ", level), Style::default().fg(color).bold()),
+                    Span::styled(msg.clone(), Style::default().fg(color)),
+                ])
+            })
+            .collect();
         Paragraph::new(logs)
-            .block(Block::default().title(" Log Messages ").borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .title(" Log Messages ")
+                    .borders(Borders::ALL),
+            )
             .style(Style::default().fg(Color::Gray))
     }
 
@@ -339,9 +538,15 @@ async fn main() {
     let stream = match UnixStream::connect(&socket_path).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Failed to connect to dashboard socket at '{}': {}", socket_path, e);
+            eprintln!(
+                "Failed to connect to dashboard socket at '{}': {}",
+                socket_path, e
+            );
             eprintln!("Is the proxy running? Check with: sudo systemctl status all-llama-proxy");
-            eprintln!("Is the socket owned by you or in the right group? Run 'ls -l {}'", socket_path);
+            eprintln!(
+                "Is the socket owned by you or in the right group? Run 'ls -l {}'",
+                socket_path
+            );
             return;
         }
     };
@@ -592,8 +797,10 @@ fn cleanup_terminal() {
     io::stdout().execute(crossterm::cursor::Show).ok();
 }
 
-
-async fn run_reader(mut socket: tokio::net::unix::OwnedReadHalf, tx: mpsc::Sender<DashboardSnapshot>) -> io::Result<()> {
+async fn run_reader(
+    mut socket: tokio::net::unix::OwnedReadHalf,
+    tx: mpsc::Sender<DashboardSnapshot>,
+) -> io::Result<()> {
     let mut buf = vec![0u8; 8192];
     let mut read_buf = Vec::new();
 
