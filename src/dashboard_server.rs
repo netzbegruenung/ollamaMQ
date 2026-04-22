@@ -1,3 +1,4 @@
+use crate::utils::LockExt;
 use crate::dispatcher::AppState;
 use crate::protocol::{decode, consumed_len, BackendSnapshot, DashboardCmd, DashboardSnapshot};
 use std::collections::HashMap;
@@ -136,20 +137,20 @@ impl DashboardServer {
 
     fn capture_snapshot(state: &AppState) -> Result<DashboardSnapshot, Box<dyn std::error::Error + Send + Sync>> {
         let queues_len: HashMap<String, usize> = {
-            let q = state.queues.lock().unwrap();
+            let q = state.queues.lock().lock_unwrap("queues");
             q.iter().map(|(k, v)| (k.clone(), v.len())).collect()
         };
-        let processing_counts = state.processing_counts.lock().unwrap().clone();
-        let processed_counts = state.processed_counts.lock().unwrap().clone();
-        let dropped_counts = state.dropped_counts.lock().unwrap().clone();
-        let user_ips = state.user_ips.lock().unwrap().clone();
-        let blocked_ips = state.blocked_ips.lock().unwrap().clone();
-        let blocked_users = state.blocked_users.lock().unwrap().clone();
-        let vip_list = state.vip_user.lock().unwrap().clone();
-        let backends = state.backends.lock().unwrap();
+        let processing_counts = state.processing_counts.lock().lock_unwrap("processing_counts").clone();
+        let processed_counts = state.processed_counts.lock().lock_unwrap("processed_counts").clone();
+        let dropped_counts = state.dropped_counts.lock().lock_unwrap("dropped_counts").clone();
+        let user_ips = state.user_ips.lock().lock_unwrap("user_ips").clone();
+        let blocked_ips = state.blocked_ips.lock().lock_unwrap("blocked_ips").clone();
+        let blocked_users = state.blocked_users.lock().lock_unwrap("blocked_users").clone();
+        let vip_list = state.vip_user.lock().lock_unwrap("vip_user").clone();
+        let backends = state.backends.lock().lock_unwrap("backends");
 
         let model_public_names: HashMap<String, String> = {
-            let config = state.model_config.read().unwrap();
+            let config = state.model_config.read().expect("model_config read");
             config.models.iter().map(|m| {
                 let display = m.public_name.clone().unwrap_or_else(|| m.name.clone());
                 (m.name.clone(), display)
@@ -170,7 +171,7 @@ impl DashboardServer {
         });
 
         let backends_wire: Vec<BackendSnapshot> = backends.iter().map(|b| {
-            let model_status = b.model_status.read().unwrap();
+            let model_status = b.model_status.read().expect("model_status read");
             let ms = model_status.clone();
             BackendSnapshot {
                 url: b.url.clone(),
@@ -201,7 +202,7 @@ impl DashboardServer {
     fn apply_cmd(state: &AppState, cmd: DashboardCmd) {
         match cmd {
             DashboardCmd::ToggleVip(user_id) => {
-                let mut vip_list = state.vip_user.lock().unwrap();
+                let mut vip_list = state.vip_user.lock().lock_unwrap("vip_user");
                 if vip_list.contains(&user_id) {
                     vip_list.retain(|u| u != &user_id);
                     info!("VIP removed: {}", user_id);
@@ -212,20 +213,20 @@ impl DashboardServer {
                 }
             }
             DashboardCmd::BlockUser(user_id) => {
-                let mut blocked_users = state.blocked_users.lock().unwrap();
+                let mut blocked_users = state.blocked_users.lock().lock_unwrap("blocked_users");
                 if blocked_users.insert(user_id.clone()) {
                     info!("User blocked: {}", user_id);
                 }
             }
             DashboardCmd::UnblockUser(user_id) => {
-                let mut blocked_users = state.blocked_users.lock().unwrap();
+                let mut blocked_users = state.blocked_users.lock().lock_unwrap("blocked_users");
                 if blocked_users.remove(&user_id) {
                     info!("User unblocked: {}", user_id);
                 }
             }
             DashboardCmd::BlockIp(ip_str) => {
                 if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
-                    let mut blocked_ips = state.blocked_ips.lock().unwrap();
+                    let mut blocked_ips = state.blocked_ips.lock().lock_unwrap("blocked_ips");
                     if blocked_ips.insert(ip) {
                         info!("IP blocked: {}", ip_str);
                     }
@@ -235,7 +236,7 @@ impl DashboardServer {
             }
             DashboardCmd::UnblockIp(ip_str) => {
                 if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
-                    let mut blocked_ips = state.blocked_ips.lock().unwrap();
+                    let mut blocked_ips = state.blocked_ips.lock().lock_unwrap("blocked_ips");
                     if blocked_ips.remove(&ip) {
                         info!("IP unblocked: {}", ip_str);
                     }
