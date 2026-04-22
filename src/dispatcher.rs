@@ -597,6 +597,7 @@ impl AppState {
         Ok(())
     }
 
+    #[allow(clippy::collapsible_if)]
     fn load_blocked_items() -> (HashSet<IpAddr>, HashSet<String>) {
         if let Ok(content) = fs::read_to_string(BLOCKED_FILE) {
             if let Ok(config) = serde_json::from_str::<BlockedConfig>(&content) {
@@ -706,6 +707,7 @@ fn extract_and_resolve_model(
     };
 
     // Update body with real model name
+    #[allow(clippy::collapsible_if)]
     if real_model != requested_model {
         if let Some(obj) = v.as_object_mut() {
             obj.insert("model".to_string(), serde_json::json!(real_model));
@@ -1406,6 +1408,7 @@ pub async fn proxy_handler(
 
     if is_debug {
         debug!("Request from user: {} to {} {}", user_id, method, path);
+        #[allow(clippy::collapsible_if)]
         if path.starts_with("/api/generate") || path.starts_with("/api/chat") {
             if let Ok(body_str) = std::str::from_utf8(&body) {
                 debug!("Request body: {}", body_str);
@@ -1579,7 +1582,7 @@ pub async fn health_handler(State(state): State<Arc<AppState>>, headers: HeaderM
         let model_status = backend.model_status.read().expect("model_status read");
         
         for (model_name, &available) in model_status.iter() {
-            let counts = model_counts.entry(model_name.clone()).or_insert_with(HashMap::new);
+            let counts = model_counts.entry(model_name.clone()).or_default();
             let key = if available { "up" } else { "down" };
             *counts.entry(key.to_string()).or_insert(0) += 1;
         }
