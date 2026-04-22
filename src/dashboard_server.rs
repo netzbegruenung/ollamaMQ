@@ -1,11 +1,11 @@
-use crate::utils::LockExt;
 use crate::dispatcher::AppState;
-use crate::protocol::{decode, consumed_len, BackendSnapshot, DashboardCmd, DashboardSnapshot};
+use crate::protocol::{BackendSnapshot, DashboardCmd, DashboardSnapshot, consumed_len, decode};
+use crate::utils::LockExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::time::{interval, Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::time::{Duration, interval};
 use tracing::{info, warn};
 
 const CHUNK_SIZE: usize = 8192;
@@ -135,26 +135,48 @@ impl DashboardServer {
         }
     }
 
-    fn capture_snapshot(state: &AppState) -> Result<DashboardSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    fn capture_snapshot(
+        state: &AppState,
+    ) -> Result<DashboardSnapshot, Box<dyn std::error::Error + Send + Sync>> {
         let queues_len: HashMap<String, usize> = {
             let q = state.queues.lock().lock_unwrap("queues");
             q.iter().map(|(k, v)| (k.clone(), v.len())).collect()
         };
-        let processing_counts = state.processing_counts.lock().lock_unwrap("processing_counts").clone();
-        let processed_counts = state.processed_counts.lock().lock_unwrap("processed_counts").clone();
-        let dropped_counts = state.dropped_counts.lock().lock_unwrap("dropped_counts").clone();
+        let processing_counts = state
+            .processing_counts
+            .lock()
+            .lock_unwrap("processing_counts")
+            .clone();
+        let processed_counts = state
+            .processed_counts
+            .lock()
+            .lock_unwrap("processed_counts")
+            .clone();
+        let dropped_counts = state
+            .dropped_counts
+            .lock()
+            .lock_unwrap("dropped_counts")
+            .clone();
         let user_ips = state.user_ips.lock().lock_unwrap("user_ips").clone();
         let blocked_ips = state.blocked_ips.lock().lock_unwrap("blocked_ips").clone();
-        let blocked_users = state.blocked_users.lock().lock_unwrap("blocked_users").clone();
+        let blocked_users = state
+            .blocked_users
+            .lock()
+            .lock_unwrap("blocked_users")
+            .clone();
         let vip_list = state.vip_user.lock().lock_unwrap("vip_user").clone();
         let backends = state.backends.lock().lock_unwrap("backends");
 
         let model_public_names: HashMap<String, String> = {
             let config = state.model_config.read().expect("model_config read");
-            config.models.iter().map(|m| {
-                let display = m.public_name.clone().unwrap_or_else(|| m.name.clone());
-                (m.name.clone(), display)
-            }).collect()
+            config
+                .models
+                .iter()
+                .map(|m| {
+                    let display = m.public_name.clone().unwrap_or_else(|| m.name.clone());
+                    (m.name.clone(), display)
+                })
+                .collect()
         };
 
         let log_lines = state.log_buffer.get_last_n(10);
@@ -163,32 +185,40 @@ impl DashboardServer {
         user_ids.sort_by(|a, b| {
             let a_q = queues_len.get(a).unwrap_or(&0) + processing_counts.get(a).unwrap_or(&0);
             let b_q = queues_len.get(b).unwrap_or(&0) + processing_counts.get(b).unwrap_or(&0);
-            let a_total = processed_counts.get(a).unwrap_or(&0) + dropped_counts.get(a).unwrap_or(&0);
-            let b_total = processed_counts.get(b).unwrap_or(&0) + dropped_counts.get(b).unwrap_or(&0);
+            let a_total =
+                processed_counts.get(a).unwrap_or(&0) + dropped_counts.get(a).unwrap_or(&0);
+            let b_total =
+                processed_counts.get(b).unwrap_or(&0) + dropped_counts.get(b).unwrap_or(&0);
             b_q.cmp(&a_q)
                 .then_with(|| b_total.cmp(&a_total))
                 .then_with(|| a.cmp(b))
         });
 
-        let backends_wire: Vec<BackendSnapshot> = backends.iter().map(|b| {
-            let model_status = b.model_status.read().expect("model_status read");
-            let ms = model_status.clone();
-            BackendSnapshot {
-                url: b.url.clone(),
-                active_requests: b.active_requests,
-                processed_count: b.processed_count,
-                is_online: b.is_online,
-                configured_models: b.configured_models.clone(),
-                model_status: ms,
-            }
-        }).collect();
+        let backends_wire: Vec<BackendSnapshot> = backends
+            .iter()
+            .map(|b| {
+                let model_status = b.model_status.read().expect("model_status read");
+                let ms = model_status.clone();
+                BackendSnapshot {
+                    url: b.url.clone(),
+                    active_requests: b.active_requests,
+                    processed_count: b.processed_count,
+                    is_online: b.is_online,
+                    configured_models: b.configured_models.clone(),
+                    model_status: ms,
+                }
+            })
+            .collect();
 
         Ok(DashboardSnapshot {
             queues_len,
             processing_counts,
             processed_counts,
             dropped_counts,
-            user_ips: user_ips.iter().map(|(k, v)| (k.clone(), v.to_string())).collect(),
+            user_ips: user_ips
+                .iter()
+                .map(|(k, v)| (k.clone(), v.to_string()))
+                .collect(),
             blocked_ips: blocked_ips.iter().map(|ip| ip.to_string()).collect(),
             blocked_users: blocked_users.iter().cloned().collect(),
             vip_list,

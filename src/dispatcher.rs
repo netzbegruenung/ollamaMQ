@@ -1,6 +1,6 @@
 use axum::{
     body::{Body, Bytes},
-    extract::{ConnectInfo, State, Path},
+    extract::{ConnectInfo, Path, State},
     http::{HeaderMap, Method, StatusCode},
     response::IntoResponse,
 };
@@ -15,12 +15,12 @@ use std::{
     sync::{Arc, Mutex, RwLock},
     time::Instant,
 };
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{Notify, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{info, warn, debug, error};
+use tracing::{debug, error, info, warn};
 
-use crate::utils::LockExt;
 use crate::auth::UserRegistry;
+use crate::utils::LockExt;
 
 const BLOCKED_FILE: &str = "blocked_items.json";
 
@@ -37,11 +37,7 @@ fn format_duration_short(d: std::time::Duration) -> String {
 }
 
 /// Extract client IP from headers or fallback to connection address
-fn extract_client_ip(
-    headers: &HeaderMap,
-    addr: SocketAddr,
-    ip_header: &Option<String>,
-) -> IpAddr {
+fn extract_client_ip(headers: &HeaderMap, addr: SocketAddr, ip_header: &Option<String>) -> IpAddr {
     if let Some(header_name) = ip_header {
         headers
             .get(header_name)
@@ -68,16 +64,26 @@ fn authenticate_request(
         Some(token) => token,
         None => {
             if is_debug {
-                debug!("Rejected request from {}: missing or malformed Authorization header", ip);
+                debug!(
+                    "Rejected request from {}: missing or malformed Authorization header",
+                    ip
+                );
             } else {
-                warn!("Rejected request from {}: missing or malformed Authorization header", ip);
+                warn!(
+                    "Rejected request from {}: missing or malformed Authorization header",
+                    ip
+                );
             }
             return None;
         }
     };
 
     use crate::utils::LockExt;
-    match user_registry.lock().lock_unwrap("user_registry").authenticate(raw_token) {
+    match user_registry
+        .lock()
+        .lock_unwrap("user_registry")
+        .authenticate(raw_token)
+    {
         Some(uid) => {
             if is_debug {
                 debug!("Authenticated user: {} from IP: {}", uid, ip);
@@ -133,7 +139,8 @@ impl LogBuffer {
     pub fn get_last_n(&self, n: usize) -> Vec<(String, i64, String)> {
         if let Ok(lines) = self.lines.read() {
             let total = lines.len();
-            lines.iter()
+            lines
+                .iter()
                 .skip(total.saturating_sub(n))
                 .map(|entry| (entry.level.clone(), entry.timestamp, entry.message.clone()))
                 .collect()
@@ -181,10 +188,10 @@ impl Write for LogBufferWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let _ = self.out.write_all(buf);
         let _ = self.out.flush();
-        
+
         if let Ok(line) = std::str::from_utf8(buf) {
             self.current_line.push_str(line);
-            
+
             // Process complete lines (ending with newline)
             while let Some(pos) = self.current_line.find('\n') {
                 let complete_line = self.current_line[..pos].trim().to_string();
@@ -199,7 +206,7 @@ impl Write for LogBufferWriter {
 
     fn flush(&mut self) -> io::Result<()> {
         let _ = self.out.flush();
-        
+
         // Process any remaining line on flush
         if !self.current_line.is_empty() {
             let complete_line = self.current_line.trim().to_string();
@@ -302,14 +309,14 @@ pub struct ModelConfig {
 pub struct ParsedModel {
     /// Real model name (required, used for routing)
     pub name: String,
-    
+
     /// Display name for /api/tags and TUI (optional, defaults to name)
     #[serde(default)]
     pub public_name: Option<String>,
-    
+
     /// Backend URLs that serve this model
     pub backends: Vec<String>,
-    
+
     /// Alias names that resolve to this model
     #[serde(default)]
     pub aliases: Vec<String>,
@@ -339,30 +346,32 @@ impl BackendStatus {
             model_status: Arc::new(RwLock::new(HashMap::new())),
         }
     }
-    
+
     /// Check if this backend can serve a specific model
     pub fn can_serve_model(&self, model_name: &str) -> bool {
         // Extract base model name (without tag) for flexible matching
         let request_base = model_name.split(':').next().unwrap_or(model_name);
-        
+
         // Check if any configured model matches (by base name or exact)
         let has_matching_config = self.configured_models.iter().any(|configured| {
             let configured_base = configured.split(':').next().unwrap_or(configured);
             configured == model_name || configured_base == request_base
         });
-        
+
         if !has_matching_config {
             return false;
         }
-        
+
         // Check per-model verification status using base-name matching
         self.model_status
             .read()
             .map(|status| {
-                status.get(model_name)
+                status
+                    .get(model_name)
                     .copied()
                     .or_else(|| {
-                        status.iter()
+                        status
+                            .iter()
                             .find(|(k, _)| {
                                 let configured_base = k.split(':').next().unwrap_or(k);
                                 configured_base == request_base
@@ -380,17 +389,17 @@ impl ModelConfig {
     pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let content = fs::read_to_string(path)?;
         let config: ModelConfig = serde_yaml::from_str(&content)?;
-        
+
         // Validate that each model has at least one backend
         for model in &config.models {
             if model.backends.is_empty() {
                 return Err(format!("Model '{}' has no backends configured", model.name).into());
             }
         }
-        
+
         Ok(config)
     }
-    
+
     /// Resolve alias to real model name, returns None if not found
     pub fn resolve_alias(&self, model_name: &str) -> Option<String> {
         // Check aliases first
@@ -399,24 +408,24 @@ impl ModelConfig {
                 return Some(model.name.clone());
             }
         }
-        
+
         // Check if it's already a real model name
         for model in &self.models {
             if model.name == model_name {
                 return Some(model.name.clone());
             }
         }
-        
+
         None
     }
-    
+
     /// Get ParsedModel by name or alias
     pub fn get_model(&self, model_name: &str) -> Option<&ParsedModel> {
-        self.models.iter().find(|m| {
-            m.name == model_name || m.aliases.contains(&model_name.to_string())
-        })
+        self.models
+            .iter()
+            .find(|m| m.name == model_name || m.aliases.contains(&model_name.to_string()))
     }
-    
+
     /// Get all unique backend URLs from all models
     pub fn get_all_backends(&self) -> BTreeSet<String> {
         let mut backends = BTreeSet::new();
@@ -427,7 +436,7 @@ impl ModelConfig {
         }
         backends
     }
-    
+
     /// Get models configured for a specific backend
     pub fn get_models_for_backend(&self, backend_url: &str) -> Vec<String> {
         self.models
@@ -453,8 +462,6 @@ pub struct Task {
     pub responder: mpsc::Sender<ResponsePart>,
     pub resolved_model: Option<String>,
 }
-
-
 
 pub struct AppState {
     pub queues: Mutex<HashMap<String, VecDeque<Task>>>,
@@ -498,20 +505,21 @@ impl AppState {
         health_check_interval: u64,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let (blocked_ips, blocked_users) = Self::load_blocked_items();
-        
+
         // Load model configuration (required, will crash if missing)
         let model_config = ModelConfig::load(&model_config_path)?;
         info!("Loaded model configuration from {}", model_config_path);
-        
+
         // Build deduplicated backend list from config
         let backend_urls = model_config.get_all_backends();
-        
+
         // Create BackendStatus entries with model configuration
-        let mut backends: Vec<BackendStatus> = backend_urls.into_iter()
+        let mut backends: Vec<BackendStatus> = backend_urls
+            .into_iter()
             .map(|url| {
                 let mut backend = BackendStatus::new(url.clone());
                 backend.configured_models = model_config.get_models_for_backend(&url);
-                
+
                 // Initialize model_status to true for all configured models
                 // (optimistic: assume available until health check proves otherwise)
                 let mut initial_status = HashMap::new();
@@ -519,18 +527,19 @@ impl AppState {
                     initial_status.insert(model_name.clone(), true);
                 }
                 *backend.model_status.write().expect("model_status write") = initial_status;
-                
+
                 backend
             })
             .collect();
-        
+
         // Sort backends for consistent ordering (optional, for TUI display)
         backends.sort_by(|a, b| a.url.cmp(&b.url));
-        
+
         info!("{} backends configured from model config", backends.len());
         for backend in &backends {
-            info!("  Backend {}: serves {} models", 
-                backend.url, 
+            info!(
+                "  Backend {}: serves {} models",
+                backend.url,
                 backend.configured_models.len()
             );
         }
@@ -559,44 +568,52 @@ impl AppState {
             health_check_interval,
         })
     }
-    
+
     /// Reload model configuration (called from SIGHUP handler)
     pub fn reload_model_config(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
         let new_config = ModelConfig::load(path)?;
-        
+
         // Update the config
         {
             let mut write_guard = self.model_config.write().expect("model_config write");
             *write_guard = new_config.clone();
         }
-        
+
         // Update backend configurations
         {
             let mut backends = self.backends.lock().lock_unwrap("backends");
             for backend in backends.iter_mut() {
                 backend.configured_models = new_config.get_models_for_backend(&backend.url);
-                
+
                 // Preserve existing per-model status for models that remain configured
                 let mut new_status = HashMap::new();
                 for model_name in &backend.configured_models {
                     // Check old status, default to true if not known
-                    let old_status = self.model_config.read().expect("model_config read")
+                    let old_status = self
+                        .model_config
+                        .read()
+                        .expect("model_config read")
                         .get_model(model_name)
                         .map(|_| {
                             // Try to get old status
-                            backend.model_status.read().expect("model_status read")
-                                .get(model_name).copied()
+                            backend
+                                .model_status
+                                .read()
+                                .expect("model_status read")
+                                .get(model_name)
+                                .copied()
                         });
-                    
+
                     new_status.insert(model_name.clone(), old_status.flatten().unwrap_or(true));
                 }
                 *backend.model_status.write().expect("model_status write") = new_status;
             }
         }
-        
+
         Ok(())
     }
 
+    #[allow(clippy::collapsible_if)]
     fn load_blocked_items() -> (HashSet<IpAddr>, HashSet<String>) {
         if let Ok(content) = fs::read_to_string(BLOCKED_FILE) {
             if let Ok(config) = serde_json::from_str::<BlockedConfig>(&content) {
@@ -609,7 +626,11 @@ impl AppState {
     fn save_blocked_items(&self) {
         let config = BlockedConfig {
             ips: self.blocked_ips.lock().lock_unwrap("blocked_ips").clone(),
-            users: self.blocked_users.lock().lock_unwrap("blocked_users").clone(),
+            users: self
+                .blocked_users
+                .lock()
+                .lock_unwrap("blocked_users")
+                .clone(),
         };
         if let Ok(content) = serde_json::to_string_pretty(&config) {
             let _ = fs::write(BLOCKED_FILE, content);
@@ -635,11 +656,17 @@ impl AppState {
     }
 
     pub fn is_ip_blocked(&self, ip: &IpAddr) -> bool {
-        self.blocked_ips.lock().lock_unwrap("blocked_ips").contains(ip)
+        self.blocked_ips
+            .lock()
+            .lock_unwrap("blocked_ips")
+            .contains(ip)
     }
 
     pub fn is_user_blocked(&self, user_id: &str) -> bool {
-        self.blocked_users.lock().lock_unwrap("blocked_users").contains(user_id)
+        self.blocked_users
+            .lock()
+            .lock_unwrap("blocked_users")
+            .contains(user_id)
     }
 }
 
@@ -677,13 +704,15 @@ fn extract_and_resolve_model(
     debug_enabled: bool,
 ) -> Option<String> {
     if !MODEL_PATHS.iter().any(|p| path.starts_with(p)) {
-        if debug_enabled { debug!("Path {} is not a model path", path); }
+        if debug_enabled {
+            debug!("Path {} is not a model path", path);
+        }
         return None;
     }
 
     let mut v: serde_json::Value = serde_json::from_slice(body).ok()?;
     let requested_model = v.get("model")?.as_str()?.to_string();
-    
+
     if debug_enabled {
         debug!("Requested model: {} on path {}", requested_model, path);
     }
@@ -706,6 +735,7 @@ fn extract_and_resolve_model(
     };
 
     // Update body with real model name
+    #[allow(clippy::collapsible_if)]
     if real_model != requested_model {
         if let Some(obj) = v.as_object_mut() {
             obj.insert("model".to_string(), serde_json::json!(real_model));
@@ -739,7 +769,8 @@ fn parse_created_timestamp(modified_at: &str) -> i64 {
     // Modified_at typically looks like: "2024-01-15T10:30:00Z" or similar
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(modified_at) {
         dt.timestamp()
-    } else if let Ok(dt) = chrono::DateTime::parse_from_str(modified_at, "%Y-%m-%d %H:%M:%S.%f%#z") {
+    } else if let Ok(dt) = chrono::DateTime::parse_from_str(modified_at, "%Y-%m-%d %H:%M:%S.%f%#z")
+    {
         dt.timestamp()
     } else {
         // Fallback to current time if parsing fails
@@ -750,19 +781,23 @@ fn parse_created_timestamp(modified_at: &str) -> i64 {
 /// Transform cached tags into OpenAI-compatible models list
 fn build_models_list(cached_tags: &Option<CachedTags>) -> OpenAIModelsList {
     let models = match cached_tags {
-        Some(tags) => tags.models.iter().map(|model| {
-            let created = parse_created_timestamp(&model.modified_at);
-            
-            OpenAIModel {
-                id: model.name.clone(),
-                object: "model",
-                created,
-                owned_by: "all-llama-proxy".to_string(),
-            }
-        }).collect(),
+        Some(tags) => tags
+            .models
+            .iter()
+            .map(|model| {
+                let created = parse_created_timestamp(&model.modified_at);
+
+                OpenAIModel {
+                    id: model.name.clone(),
+                    object: "model",
+                    created,
+                    owned_by: "all-llama-proxy".to_string(),
+                }
+            })
+            .collect(),
         None => vec![],
     };
-    
+
     OpenAIModelsList {
         object: "list",
         data: models,
@@ -772,14 +807,14 @@ fn build_models_list(cached_tags: &Option<CachedTags>) -> OpenAIModelsList {
 /// Find a single model by name (matches public_name, name, or alias)
 fn find_model_by_name(state: &AppState, requested_model: &str) -> Option<OpenAIModel> {
     let cached_tags = state.cached_tags.read().expect("cached_tags read");
-    
+
     // First, try to find in cache by name
     let model_info = cached_tags.as_ref().and_then(|tags| {
-        tags.models.iter().find(|m| {
-            m.name == requested_model || m.name == format!("{}:latest", requested_model)
-        })
+        tags.models
+            .iter()
+            .find(|m| m.name == requested_model || m.name == format!("{}:latest", requested_model))
     });
-    
+
     if let Some(model) = model_info {
         let created = parse_created_timestamp(&model.modified_at);
         return Some(OpenAIModel {
@@ -789,14 +824,15 @@ fn find_model_by_name(state: &AppState, requested_model: &str) -> Option<OpenAIM
             owned_by: "all-llama-proxy".to_string(),
         });
     }
-    
+
     // Also check if it's an alias that resolves to a real model
     let config = state.model_config.read().expect("model_config read");
     if let Some(real_model) = config.resolve_alias(requested_model) {
         // Find the real model in cache
-        if let Some(real_model_info) = cached_tags.as_ref().and_then(|tags| {
-            tags.models.iter().find(|m| m.name == real_model)
-        }) {
+        if let Some(real_model_info) = cached_tags
+            .as_ref()
+            .and_then(|tags| tags.models.iter().find(|m| m.name == real_model))
+        {
             let created = parse_created_timestamp(&real_model_info.modified_at);
             return Some(OpenAIModel {
                 id: real_model_info.name.clone(),
@@ -806,21 +842,26 @@ fn find_model_by_name(state: &AppState, requested_model: &str) -> Option<OpenAIM
             });
         }
     }
-    
+
     None
 }
 
 /// Build merged /api/tags cache from all configured models using their first backends
-async fn build_tags_cache(state: &AppState, client: &reqwest::Client) -> Result<(), Box<dyn std::error::Error>> {
+async fn build_tags_cache(
+    state: &AppState,
+    client: &reqwest::Client,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Clone model list to release the lock before awaiting
     let models_to_fetch: Vec<(String, Option<String>, String)> = {
         let config = state.model_config.read().expect("model_config read");
-        config.models.iter()
+        config
+            .models
+            .iter()
             .filter(|m| !m.backends.is_empty())
             .map(|m| (m.name.clone(), m.public_name.clone(), m.backends[0].clone()))
             .collect()
     };
-    
+
     let mut merged_models: Vec<PublicModelInfo> = Vec::new();
 
     for (model_name, public_name_opt, backend_url) in models_to_fetch {
@@ -830,20 +871,19 @@ async fn build_tags_cache(state: &AppState, client: &reqwest::Client) -> Result<
             Ok(resp) => {
                 if let Ok(backend_response) = resp.json::<ModelsResponse>().await {
                     // Find matching model in backend response
-                    if let Some(backend_model) = backend_response.models.iter()
-                        .find(|value| {
-                            if let Some(name) = value.get("name").and_then(|v| v.as_str()) {
-                                name == model_name || name.starts_with(model_name.as_str())
-                            } else {
-                                false
-                            }
-                        })
-                    {
+                    if let Some(backend_model) = backend_response.models.iter().find(|value| {
+                        if let Some(name) = value.get("name").and_then(|v| v.as_str()) {
+                            name == model_name || name.starts_with(model_name.as_str())
+                        } else {
+                            false
+                        }
+                    }) {
                         // Parse the backend model with all fields
-                        if let Ok(backend_info) = serde_json::from_value::<BackendModelInfo>(backend_model.clone()) {
+                        if let Ok(backend_info) =
+                            serde_json::from_value::<BackendModelInfo>(backend_model.clone())
+                        {
                             // Get public_name (or fallback to name)
-                            let public_name = public_name_opt.as_ref()
-                                .unwrap_or(&model_name);
+                            let public_name = public_name_opt.as_ref().unwrap_or(&model_name);
 
                             // Create PublicModelInfo with public_name overriding name/model
                             merged_models.push(PublicModelInfo {
@@ -859,7 +899,10 @@ async fn build_tags_cache(state: &AppState, client: &reqwest::Client) -> Result<
                 }
             }
             Err(e) => {
-                debug!("Failed to fetch /api/tags from {} for model {}: {}", backend_url, model_name, e);
+                debug!(
+                    "Failed to fetch /api/tags from {} for model {}: {}",
+                    backend_url, model_name, e
+                );
             }
         }
     }
@@ -867,7 +910,9 @@ async fn build_tags_cache(state: &AppState, client: &reqwest::Client) -> Result<
     // Update cache
     {
         let mut cache = state.cached_tags.write().expect("cached_tags write");
-        *cache = Some(CachedTags { models: merged_models });
+        *cache = Some(CachedTags {
+            models: merged_models,
+        });
         let model_count = cache.as_ref().map(|c| c.models.len()).unwrap_or(0);
         debug!("Built cache with {} models", model_count);
     }
@@ -891,12 +936,21 @@ struct DispatchTaskArgs {
 }
 
 fn dispatch_task(args: DispatchTaskArgs) {
-    let DispatchTaskArgs { user_id, task, backend_idx, backend_url, state, client } = args;
+    let DispatchTaskArgs {
+        user_id,
+        task,
+        backend_idx,
+        backend_url,
+        state,
+        client,
+    } = args;
     let url = format!("{}{}", backend_url, task.path);
 
     if state.debug {
-        debug!("Spawning task for user {} -> backend {} ({})",
-            user_id, backend_url, task.path);
+        debug!(
+            "Spawning task for user {} -> backend {} ({})",
+            user_id, backend_url, task.path
+        );
     }
 
     tokio::spawn(async move {
@@ -906,7 +960,11 @@ fn dispatch_task(args: DispatchTaskArgs) {
             let user_ips = state.user_ips.lock().lock_unwrap("user_ips");
             let blocked_ips = state.blocked_ips.lock().lock_unwrap("blocked_ips");
             let blocked_users = state.blocked_users.lock().lock_unwrap("blocked_users");
-            blocked_users.contains(&user_id) || user_ips.get(&user_id).map(|ip| blocked_ips.contains(ip)).unwrap_or(false)
+            blocked_users.contains(&user_id)
+                || user_ips
+                    .get(&user_id)
+                    .map(|ip| blocked_ips.contains(ip))
+                    .unwrap_or(false)
         };
 
         if is_blocked || task.responder.is_closed() {
@@ -914,7 +972,10 @@ fn dispatch_task(args: DispatchTaskArgs) {
             *dropped.entry(user_id.clone()).or_insert(0) += 1;
         } else {
             {
-                let mut processing = state.processing_counts.lock().lock_unwrap("processing_counts");
+                let mut processing = state
+                    .processing_counts
+                    .lock()
+                    .lock_unwrap("processing_counts");
                 *processing.entry(user_id.clone()).or_insert(0) += 1;
             }
 
@@ -930,7 +991,8 @@ fn dispatch_task(args: DispatchTaskArgs) {
                 }
             }
 
-            let res_fut = client.request(task.method, &url)
+            let res_fut = client
+                .request(task.method, &url)
                 .headers(task.headers)
                 .body(task.body)
                 .send();
@@ -940,21 +1002,33 @@ fn dispatch_task(args: DispatchTaskArgs) {
                     let status = response.status();
 
                     if state.debug {
-                        debug!("Backend {} responded with status {} for user {}",
-                            backend_url, status, user_id);
+                        debug!(
+                            "Backend {} responded with status {} for user {}",
+                            backend_url, status, user_id
+                        );
                     }
 
                     let mut headers = response.headers().clone();
                     headers.remove(axum::http::header::TRANSFER_ENCODING);
                     headers.remove(axum::http::header::CONTENT_LENGTH);
 
-                    if task.responder.send(ResponsePart::Status(status, headers)).await.is_ok() {
+                    if task
+                        .responder
+                        .send(ResponsePart::Status(status, headers))
+                        .await
+                        .is_ok()
+                    {
                         let mut stream = response.bytes_stream();
                         let mut client_disconnected = false;
                         while let Some(chunk_res) = stream.next().await {
                             match chunk_res {
                                 Ok(chunk) => {
-                                    if task.responder.send(ResponsePart::Chunk(chunk)).await.is_err() {
+                                    if task
+                                        .responder
+                                        .send(ResponsePart::Chunk(chunk))
+                                        .await
+                                        .is_err()
+                                    {
                                         client_disconnected = true;
                                         break;
                                     }
@@ -964,51 +1038,70 @@ fn dispatch_task(args: DispatchTaskArgs) {
                         }
 
                         if !client_disconnected {
-                            let mut counts = state.processed_counts.lock().lock_unwrap("processed_counts");
+                            let mut counts = state
+                                .processed_counts
+                                .lock()
+                                .lock_unwrap("processed_counts");
                             *counts.entry(user_id.clone()).or_insert(0) += 1;
 
                             // Log completion
-                            let model_info = task.resolved_model
+                            let model_info = task
+                                .resolved_model
                                 .as_ref()
                                 .map(|m| format!(" using {}", m))
                                 .unwrap_or_default();
-                            info!("Request finished for user {}{}, duration {}",
+                            info!(
+                                "Request finished for user {}{}, duration {}",
                                 user_id,
                                 model_info,
-                                format_duration_short(start.elapsed()));
+                                format_duration_short(start.elapsed())
+                            );
                         } else {
-                            let mut dropped = state.dropped_counts.lock().lock_unwrap("dropped_counts");
+                            let mut dropped =
+                                state.dropped_counts.lock().lock_unwrap("dropped_counts");
                             *dropped.entry(user_id.clone()).or_insert(0) += 1;
                         }
                     }
                 }
                 Err(e) => {
-                    error!("Backend {} request failed for user {}: {}", backend_url, user_id, e);
+                    error!(
+                        "Backend {} request failed for user {}: {}",
+                        backend_url, user_id, e
+                    );
                     let _ = task.responder.send(ResponsePart::Error(e)).await;
                     let mut dropped = state.dropped_counts.lock().lock_unwrap("dropped_counts");
                     *dropped.entry(user_id.clone()).or_insert(0) += 1;
 
                     // Log failure
-                    let model_info = task.resolved_model
+                    let model_info = task
+                        .resolved_model
                         .as_ref()
                         .map(|m| format!(" using {}", m))
                         .unwrap_or_default();
-                    info!("Request failed for user {}{}, duration {}",
+                    info!(
+                        "Request failed for user {}{}, duration {}",
                         user_id,
                         model_info,
-                        format_duration_short(start.elapsed()));
+                        format_duration_short(start.elapsed())
+                    );
                 }
             }
 
             {
-                let mut processing = state.processing_counts.lock().lock_unwrap("processing_counts");
-                if let Some(count) = processing.get_mut(&user_id) { *count = count.saturating_sub(1); }
+                let mut processing = state
+                    .processing_counts
+                    .lock()
+                    .lock_unwrap("processing_counts");
+                if let Some(count) = processing.get_mut(&user_id) {
+                    *count = count.saturating_sub(1);
+                }
             }
         }
 
         {
             let mut backends = state.backends.lock().lock_unwrap("backends");
-            backends[backend_idx].active_requests = backends[backend_idx].active_requests.saturating_sub(1);
+            backends[backend_idx].active_requests =
+                backends[backend_idx].active_requests.saturating_sub(1);
             backends[backend_idx].processed_count += 1;
         }
         state.backend_freed.notify_one();
@@ -1025,7 +1118,13 @@ async fn handle_model_not_found(task: Task, model_name: String) {
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("application/json"),
     );
-    let _ = task.responder.send(ResponsePart::Status(StatusCode::SERVICE_UNAVAILABLE, headers)).await;
+    let _ = task
+        .responder
+        .send(ResponsePart::Status(
+            StatusCode::SERVICE_UNAVAILABLE,
+            headers,
+        ))
+        .await;
     let _ = task.responder.send(ResponsePart::Chunk(error_body)).await;
 }
 
@@ -1037,7 +1136,11 @@ fn spawn_health_checker(state: Arc<AppState>, client: reqwest::Client) {
         loop {
             let backends_to_check: Vec<(usize, String)> = {
                 let backends = state.backends.lock().lock_unwrap("backends");
-                backends.iter().enumerate().map(|(i, b)| (i, b.url.clone())).collect()
+                backends
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| (i, b.url.clone()))
+                    .collect()
             };
 
             for (idx, url) in backends_to_check {
@@ -1048,38 +1151,46 @@ fn spawn_health_checker(state: Arc<AppState>, client: reqwest::Client) {
                         let backend_models: Vec<BackendModelInfo> = resp
                             .json::<ModelsResponse>()
                             .await
-                            .map(|mr| mr.models.into_iter()
-                                .filter_map(|value| {
-                                    serde_json::from_value::<BackendModelInfo>(value).ok()
-                                })
-                                .collect())
+                            .map(|mr| {
+                                mr.models
+                                    .into_iter()
+                                    .filter_map(|value| {
+                                        serde_json::from_value::<BackendModelInfo>(value).ok()
+                                    })
+                                    .collect()
+                            })
                             .unwrap_or_default();
 
                         let mut backends = state.backends.lock().lock_unwrap("backends");
                         let backend = &mut backends[idx];
-                        
+
                         // Mark as online
                         if !backend.is_online {
                             info!("Backend {} is back online", url);
                             backend.is_online = true;
                         }
-                        
+
                         // Update per-model status (use base-name matching)
-                        let mut model_status = backend.model_status.write().expect("model_status write");
-                        let backend_model_names: HashSet<String> = backend_models.iter()
-                            .map(|m| m.name.clone())
-                            .collect();
-                        
+                        let mut model_status =
+                            backend.model_status.write().expect("model_status write");
+                        let backend_model_names: HashSet<String> =
+                            backend_models.iter().map(|m| m.name.clone()).collect();
+
                         for configured_model in &backend.configured_models {
-                            let config_base = configured_model.split(':').next().unwrap_or(configured_model);
-                            let was_available = model_status.get(configured_model).copied().unwrap_or(true);
-                            
+                            let config_base = configured_model
+                                .split(':')
+                                .next()
+                                .unwrap_or(configured_model);
+                            let was_available =
+                                model_status.get(configured_model).copied().unwrap_or(true);
+
                             // Check if backend has any model with matching base name
                             let is_available = backend_model_names.iter().any(|backend_model| {
-                                let backend_base = backend_model.split(':').next().unwrap_or(backend_model);
+                                let backend_base =
+                                    backend_model.split(':').next().unwrap_or(backend_model);
                                 backend_base == config_base
                             });
-                            
+
                             if was_available && !is_available {
                                 warn!(
                                     "Backend {} no longer has model {} available (but is configured)",
@@ -1091,31 +1202,32 @@ fn spawn_health_checker(state: Arc<AppState>, client: reqwest::Client) {
                                     url, configured_model
                                 );
                             }
-                            
+
                             model_status.insert(configured_model.clone(), is_available);
                         }
                     }
                     Err(_) => {
                         let mut backends = state.backends.lock().lock_unwrap("backends");
                         let backend = &mut backends[idx];
-                        
+
                         if backend.is_online {
                             info!("Backend {} went offline", url);
                             backend.is_online = false;
                         }
-                        
+
                         // Mark all configured models as unavailable
-                        let mut model_status = backend.model_status.write().expect("model_status write");
+                        let mut model_status =
+                            backend.model_status.write().expect("model_status write");
                         for model_name in &backend.configured_models {
                             model_status.insert(model_name.clone(), false);
                         }
                     }
                 }
             }
-            
+
             // Build merged cache after checking all backends
             let _ = build_tags_cache(&state, &client).await;
-            
+
             tokio::time::sleep(std::time::Duration::from_secs(state.health_check_interval)).await;
         }
     });
@@ -1124,12 +1236,16 @@ fn spawn_health_checker(state: Arc<AppState>, client: reqwest::Client) {
 fn select_and_prepare_task(state: &Arc<AppState>, current_idx: &mut usize) -> SelectionResult {
     let queues = state.queues.lock().lock_unwrap("queues");
     let mut backends = state.backends.lock().lock_unwrap("backends");
-    let mut last_idx = state.last_backend_idx.lock().lock_unwrap("last_backend_idx");
+    let mut last_idx = state
+        .last_backend_idx
+        .lock()
+        .lock_unwrap("last_backend_idx");
 
     // 1. Find all available online backends (Limit: 1 request per backend)
     let online_indices: Vec<usize> = {
         let backends = state.backends.lock().lock_unwrap("backends");
-        backends.iter()
+        backends
+            .iter()
             .enumerate()
             .filter(|(_, b)| b.is_online && b.active_requests < 1)
             .map(|(i, _)| i)
@@ -1155,8 +1271,20 @@ fn select_and_prepare_task(state: &Arc<AppState>, current_idx: &mut usize) -> Se
     }
 
     active_users.sort_by(|a, b| {
-        let a_total = state.processed_counts.lock().lock_unwrap("processed_counts").get(a).cloned().unwrap_or(0);
-        let b_total = state.processed_counts.lock().lock_unwrap("processed_counts").get(b).cloned().unwrap_or(0);
+        let a_total = state
+            .processed_counts
+            .lock()
+            .lock_unwrap("processed_counts")
+            .get(a)
+            .cloned()
+            .unwrap_or(0);
+        let b_total = state
+            .processed_counts
+            .lock()
+            .lock_unwrap("processed_counts")
+            .get(b)
+            .cloned()
+            .unwrap_or(0);
         a_total.cmp(&b_total).then_with(|| a.cmp(b))
     });
 
@@ -1169,7 +1297,9 @@ fn select_and_prepare_task(state: &Arc<AppState>, current_idx: &mut usize) -> Se
     }
 
     if target_user.is_none() {
-        if *current_idx >= active_users.len() { *current_idx = 0; }
+        if *current_idx >= active_users.len() {
+            *current_idx = 0;
+        }
         target_user = Some(active_users[*current_idx].clone());
         *current_idx += 1;
     }
@@ -1189,7 +1319,7 @@ fn select_and_prepare_task(state: &Arc<AppState>, current_idx: &mut usize) -> Se
                 return SelectionResult::Wait;
             }
         };
-        
+
         let task = match queue.front() {
             Some(t) => t,
             None => {
@@ -1197,7 +1327,7 @@ fn select_and_prepare_task(state: &Arc<AppState>, current_idx: &mut usize) -> Se
                 return SelectionResult::Wait;
             }
         };
-        
+
         task.body.clone()
     };
 
@@ -1208,7 +1338,8 @@ fn select_and_prepare_task(state: &Arc<AppState>, current_idx: &mut usize) -> Se
     let requested_model = peek_model_from_body(&task_body);
 
     // Resolve alias to get the real model name (for routing decisions)
-    let resolved_model = requested_model.clone()
+    let resolved_model = requested_model
+        .clone()
         .and_then(|model| {
             if let Some(resolved) = config.resolve_alias(&model) {
                 Some(resolved)
@@ -1225,20 +1356,25 @@ fn select_and_prepare_task(state: &Arc<AppState>, current_idx: &mut usize) -> Se
     match resolved_model {
         Some(model) => {
             // Filter backends: can serve this model
-            let eligible: Vec<usize> = online_indices.iter().cloned()
+            let eligible: Vec<usize> = online_indices
+                .iter()
+                .cloned()
                 .filter(|&i| backends[i].can_serve_model(&model))
                 .collect();
 
             if eligible.is_empty() {
                 // No eligible backend - wait, do NOT pop the task
                 if is_debug {
-                    debug!("No backend can serve model '{}' for user {}", model, user_id);
+                    debug!(
+                        "No backend can serve model '{}' for user {}",
+                        model, user_id
+                    );
                 }
                 SelectionResult::Wait
             } else {
                 // NOW pop the task (backend is guaranteed available)
                 let mut task = {
-    let mut queues = state.queues.lock().lock_unwrap("queues");
+                    let mut queues = state.queues.lock().lock_unwrap("queues");
                     let queue = match queues.get_mut(&user_id) {
                         Some(q) => q,
                         None => {
@@ -1246,7 +1382,7 @@ fn select_and_prepare_task(state: &Arc<AppState>, current_idx: &mut usize) -> Se
                             return SelectionResult::Wait;
                         }
                     };
-                    
+
                     match queue.pop_front() {
                         Some(t) => t,
                         None => {
@@ -1259,7 +1395,8 @@ fn select_and_prepare_task(state: &Arc<AppState>, current_idx: &mut usize) -> Se
 
                 // Resolve alias in body (mutate the body)
                 let config = state.model_config.read().expect("model_config read");
-                let resolved_model_name = extract_and_resolve_model(&mut task.body, &task.path, &config, is_debug);
+                let resolved_model_name =
+                    extract_and_resolve_model(&mut task.body, &task.path, &config, is_debug);
 
                 // Store resolved model in task and log if alias was used
                 if let Some(ref resolved) = resolved_model_name {
@@ -1272,29 +1409,32 @@ fn select_and_prepare_task(state: &Arc<AppState>, current_idx: &mut usize) -> Se
                         .or_else(|| Some(resolved.clone()));
 
                     if orig_normalized.as_ref() != Some(resolved) {
-                        info!("Mapped requested model {} to {} for user {}",
+                        info!(
+                            "Mapped requested model {} to {} for user {}",
                             requested_model.as_deref().unwrap_or("unknown"),
                             resolved,
-                            user_id);
+                            user_id
+                        );
                     }
                 }
 
                 let selected_backend_idx = {
                     // safe: eligible is guaranteed non-empty from earlier filter
-                    let min_conns = eligible.iter()
+                    let min_conns = eligible
+                        .iter()
                         .map(|&i| backends[i].active_requests)
                         .min()
                         .expect("eligible backends list should not be empty");
-                    let candidates: Vec<usize> = eligible.iter()
+                    let candidates: Vec<usize> = eligible
+                        .iter()
                         .cloned()
                         .filter(|&i| backends[i].active_requests == min_conns)
                         .collect();
-                    let candidate_pos = candidates.iter()
-                        .position(|&i| i > *last_idx)
-                        .unwrap_or(0);
-                    
+                    let candidate_pos = candidates.iter().position(|&i| i > *last_idx).unwrap_or(0);
+
                     // Bounds check for safety
-                    let selected = candidates.get(candidate_pos % candidates.len())
+                    let selected = candidates
+                        .get(candidate_pos % candidates.len())
                         .copied()
                         .expect("candidates should not be empty");
                     *last_idx = selected;
@@ -1302,11 +1442,9 @@ fn select_and_prepare_task(state: &Arc<AppState>, current_idx: &mut usize) -> Se
                 };
 
                 if is_debug {
-                    debug!("Selected backend {} (idx {}) for user {}, model {}",
-                        backends[selected_backend_idx].url,
-                        selected_backend_idx,
-                        user_id,
-                        model
+                    debug!(
+                        "Selected backend {} (idx {}) for user {}, model {}",
+                        backends[selected_backend_idx].url, selected_backend_idx, user_id, model
                     );
                 }
 
@@ -1315,14 +1453,14 @@ fn select_and_prepare_task(state: &Arc<AppState>, current_idx: &mut usize) -> Se
                     user_id,
                     task,
                     selected_backend_idx,
-                    backends[selected_backend_idx].url.clone()
+                    backends[selected_backend_idx].url.clone(),
                 )
             }
         }
         None => {
             // Model not in config - pop and fail
             let task = {
-    let mut queues = state.queues.lock().lock_unwrap("queues");
+                let mut queues = state.queues.lock().lock_unwrap("queues");
                 let queue = match queues.get_mut(&user_id) {
                     Some(q) => q,
                     None => {
@@ -1330,7 +1468,7 @@ fn select_and_prepare_task(state: &Arc<AppState>, current_idx: &mut usize) -> Se
                         return SelectionResult::Wait;
                     }
                 };
-                
+
                 match queue.pop_front() {
                     Some(t) => t,
                     None => {
@@ -1406,6 +1544,7 @@ pub async fn proxy_handler(
 
     if is_debug {
         debug!("Request from user: {} to {} {}", user_id, method, path);
+        #[allow(clippy::collapsible_if)]
         if path.starts_with("/api/generate") || path.starts_with("/api/chat") {
             if let Ok(body_str) = std::str::from_utf8(&body) {
                 debug!("Request body: {}", body_str);
@@ -1446,7 +1585,7 @@ pub async fn proxy_handler(
     };
 
     {
-    let mut queues = state.queues.lock().lock_unwrap("queues");
+        let mut queues = state.queues.lock().lock_unwrap("queues");
         queues
             .entry(user_id.clone())
             .or_insert_with(VecDeque::new)
@@ -1465,12 +1604,10 @@ pub async fn proxy_handler(
             if is_debug {
                 debug!("Received response status {} for user: {}", status, user_id);
             }
-            let stream = ReceiverStream::new(rx).map(|part| {
-                match part {
-                    ResponsePart::Chunk(chunk) => Ok(chunk),
-                    ResponsePart::Error(e) => Err(e),
-                    ResponsePart::ModelNotFound(_) | ResponsePart::Status(_, _) => Ok(Bytes::new()),
-                }
+            let stream = ReceiverStream::new(rx).map(|part| match part {
+                ResponsePart::Chunk(chunk) => Ok(chunk),
+                ResponsePart::Error(e) => Err(e),
+                ResponsePart::ModelNotFound(_) | ResponsePart::Status(_, _) => Ok(Bytes::new()),
             });
 
             let mut res = Body::from_stream(stream).into_response();
@@ -1480,11 +1617,19 @@ pub async fn proxy_handler(
         }
         Some(ResponsePart::Error(e)) => {
             error!("Backend error for user {}: {}", user_id, e);
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("Backend error: {}", e)).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Backend error: {}", e),
+            )
+                .into_response()
         }
         _ => {
             error!("Worker failed to respond for user {}", user_id);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Worker failed to respond").into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Worker failed to respond",
+            )
+                .into_response()
         }
     }
 }
@@ -1518,14 +1663,16 @@ pub async fn tags_handler(
     let cache = state.cached_tags.read().expect("cached_tags read");
     match cache.as_ref() {
         Some(cached_tags) => (StatusCode::OK, axum::Json(cached_tags.clone())).into_response(),
-        None => (StatusCode::OK, axum::Json(serde_json::json!({"models": []}))).into_response(),
+        None => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({"models": []})),
+        )
+            .into_response(),
     }
 }
 
 /// OpenAI-compatible models list handler
-pub async fn models_handler(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn models_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let models_list = build_models_list(&state.cached_tags.read().expect("cached_tags read"));
     (StatusCode::OK, axum::Json(models_list)).into_response()
 }
@@ -1544,8 +1691,9 @@ pub async fn model_handler(
                     "code": "model_not_found",
                     "message": format!("Model '{}' not found", model_name)
                 }
-            }))
-        ).into_response(),
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -1554,16 +1702,22 @@ struct HealthResponse {
     models: HashMap<String, String>,
 }
 
-pub async fn health_handler(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+pub async fn health_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     // Simple authentication - no IP tracking, minimal logging
     let valid = match headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
     {
-        Some(token) => {
-            state.user_registry.lock().lock_unwrap("user_registry").authenticate(token).is_some()
-        }
+        Some(token) => state
+            .user_registry
+            .lock()
+            .lock_unwrap("user_registry")
+            .authenticate(token)
+            .is_some(),
         None => false,
     };
 
@@ -1572,25 +1726,25 @@ pub async fn health_handler(State(state): State<Arc<AppState>>, headers: HeaderM
     }
 
     let mut model_counts: HashMap<String, HashMap<String, usize>> = HashMap::new();
-    
+
     let backends = state.backends.lock().lock_unwrap("backends");
-    
+
     for backend in backends.iter() {
         let model_status = backend.model_status.read().expect("model_status read");
-        
+
         for (model_name, &available) in model_status.iter() {
-            let counts = model_counts.entry(model_name.clone()).or_insert_with(HashMap::new);
+            let counts = model_counts.entry(model_name.clone()).or_default();
             let key = if available { "up" } else { "down" };
             *counts.entry(key.to_string()).or_insert(0) += 1;
         }
     }
-    
+
     let mut models: HashMap<String, String> = HashMap::new();
     for (model_name, counts) in model_counts.iter() {
         let up_count = counts.get("up").copied().unwrap_or(0);
         let down_count = counts.get("down").copied().unwrap_or(0);
         let total = up_count + down_count;
-        
+
         let status = if total == 0 || up_count == 0 {
             "down"
         } else if up_count == total {
@@ -1598,10 +1752,10 @@ pub async fn health_handler(State(state): State<Arc<AppState>>, headers: HeaderM
         } else {
             "degraded"
         };
-        
+
         models.insert(model_name.clone(), status.to_string());
     }
-    
+
     (StatusCode::OK, axum::Json(HealthResponse { models })).into_response()
 }
 
@@ -1615,7 +1769,7 @@ mod tests {
         let registry = Arc::new(UserRegistry::empty());
         let log_buffer = LogBuffer::new(100);
         let config = ModelConfig { models: vec![] };
-        
+
         Arc::new(AppState {
             queues: Mutex::new(HashMap::new()),
             processing_counts: Mutex::new(HashMap::new()),
@@ -1645,7 +1799,7 @@ mod tests {
     async fn test_worker_doesnt_deadlock() {
         // Simple smoke test: create state and call run_worker briefly
         let state = create_test_state();
-        
+
         // Add a backend and user with empty queue
         {
             let mut backends = state.backends.lock().lock_unwrap("backends");
@@ -1658,7 +1812,7 @@ mod tests {
                 model_status: Arc::new(RwLock::new(HashMap::new())),
             });
         }
-        
+
         // Test completes without hanging
         assert!(state.backends.lock().lock_unwrap("backends").len() == 1);
     }

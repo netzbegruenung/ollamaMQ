@@ -1,6 +1,6 @@
-use bincode::serde::encode_to_vec;
-use bincode::serde::decode_from_slice;
 use bincode::config::standard;
+use bincode::serde::decode_from_slice;
+use bincode::serde::encode_to_vec;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -88,10 +88,12 @@ pub fn decode<T: for<'a> Deserialize<'a>>(buf: &[u8]) -> std::io::Result<Option<
     let config = standard();
     decode_from_slice::<T, _>(data, config)
         .map(|(value, _)| Some(value))
-        .map_err(|e| std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("bincode decode error: {}", e),
-        ))
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("bincode decode error: {}", e),
+            )
+        })
 }
 
 /// Returns how many bytes to consume after successfully decoding, or None if not a valid message.

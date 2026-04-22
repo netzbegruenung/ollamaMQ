@@ -37,13 +37,7 @@ impl UserRegistry {
         let map = parsed
             .users
             .into_iter()
-            .map(|e| {
-                (
-                    e.token_hash.to_lowercase(),
-                    e.user_id,
-                    e.vip,
-                )
-            })
+            .map(|e| (e.token_hash.to_lowercase(), e.user_id, e.vip))
             .collect();
         Ok(Self { map })
     }
@@ -59,10 +53,7 @@ impl UserRegistry {
     /// Returns `Some(user_id)` if the token is known, `None` otherwise.
     pub fn authenticate(&self, raw_token: &str) -> Option<&str> {
         let digest = Sha256::digest(raw_token.as_bytes());
-        let hash: String = digest
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect();
+        let hash: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
 
         // We must check every entry regardless of whether a match occurs early,
         // so we use constant-time comparison and accumulate the result.
@@ -80,11 +71,7 @@ impl UserRegistry {
             }
         }
 
-        if matches == 1 {
-            matched_user
-        } else {
-            None
-        }
+        if matches == 1 { matched_user } else { None }
     }
 
     /// Return a list of all VIP user IDs.
@@ -117,27 +104,25 @@ mod tests {
 
     #[test]
     fn known_token_matches() {
-        let registry = make_registry(vec![
-            (sha256_hex("").as_str(), "alice", false),
-        ]);
+        let registry = make_registry(vec![(sha256_hex("").as_str(), "alice", false)]);
         let result = registry.authenticate("");
         assert_eq!(result, Some("alice"));
     }
 
     #[test]
     fn unknown_token_rejected() {
-        let registry = make_registry(vec![
-            (sha256_hex("").as_str(), "alice", false),
-        ]);
+        let registry = make_registry(vec![(sha256_hex("").as_str(), "alice", false)]);
         let result = registry.authenticate("wrong-token");
         assert!(result.is_none());
     }
 
     #[test]
     fn case_insensitive_hash() {
-        let registry = make_registry(vec![
-            (sha256_hex("").to_uppercase().as_str(), "alice", false),
-        ]);
+        let registry = make_registry(vec![(
+            sha256_hex("").to_uppercase().as_str(),
+            "alice",
+            false,
+        )]);
         let result = registry.authenticate("");
         assert_eq!(result, Some("alice"));
     }
