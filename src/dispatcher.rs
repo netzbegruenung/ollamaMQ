@@ -1323,7 +1323,7 @@ fn spawn_model_keeper(state: Arc<AppState>, client: reqwest::Client) {
 }
 
 fn select_and_prepare_task(state: &Arc<AppState>, current_idx: &mut usize) -> SelectionResult {
-    let queues = state.queues.lock().lock_unwrap("queues");
+    let mut queues = state.queues.lock().lock_unwrap("queues");
     let mut backends = state.backends.lock().lock_unwrap("backends");
     let mut last_idx = state
         .last_backend_idx
@@ -1331,15 +1331,12 @@ fn select_and_prepare_task(state: &Arc<AppState>, current_idx: &mut usize) -> Se
         .lock_unwrap("last_backend_idx");
 
     // 1. Find all available online backends (Limit: 1 request per backend)
-    let online_indices: Vec<usize> = {
-        let backends = state.backends.lock().lock_unwrap("backends");
-        backends
-            .iter()
-            .enumerate()
-            .filter(|(_, b)| b.is_online && b.active_requests < 1)
-            .map(|(i, _)| i)
-            .collect()
-    };
+    let online_indices: Vec<usize> = backends
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.is_online && b.active_requests < 1)
+        .map(|(i, _)| i)
+        .collect();
 
     if online_indices.is_empty() {
         return SelectionResult::Wait;
@@ -1399,25 +1396,12 @@ fn select_and_prepare_task(state: &Arc<AppState>, current_idx: &mut usize) -> Se
     };
 
     // Peek at the task to get the model BEFORE popping
-    let task_body = {
-        let queues = state.queues.lock().lock_unwrap("queues");
-        let queue = match queues.get(&user_id) {
-            Some(q) => q,
-            None => {
-                warn!("User {} disappeared from queues after selection", user_id);
-                return SelectionResult::Wait;
-            }
-        };
-
-        let task = match queue.front() {
-            Some(t) => t,
-            None => {
-                warn!("Queue for user {} became empty after selection", user_id);
-                return SelectionResult::Wait;
-            }
-        };
-
-        task.body.clone()
+    let task_body = match queues.get(&user_id).and_then(|q| q.front()) {
+        Some(task) => task.body.clone(),
+        None => {
+            warn!("User {} disappeared from queues after selection", user_id);
+            return SelectionResult::Wait;
+        }
     };
 
     let is_debug = state.debug;
@@ -1462,22 +1446,11 @@ fn select_and_prepare_task(state: &Arc<AppState>, current_idx: &mut usize) -> Se
                 SelectionResult::Wait
             } else {
                 // NOW pop the task (backend is guaranteed available)
-                let mut task = {
-                    let mut queues = state.queues.lock().lock_unwrap("queues");
-                    let queue = match queues.get_mut(&user_id) {
-                        Some(q) => q,
-                        None => {
-                            warn!("User {} disappeared from queues before pop", user_id);
-                            return SelectionResult::Wait;
-                        }
-                    };
-
-                    match queue.pop_front() {
-                        Some(t) => t,
-                        None => {
-                            warn!("Queue for user {} became empty before pop", user_id);
-                            return SelectionResult::Wait;
-                        }
+                let mut task = match queues.get_mut(&user_id).and_then(|q| q.pop_front()) {
+                    Some(t) => t,
+                    None => {
+                        warn!("User {} disappeared from queues before pop", user_id);
+                        return SelectionResult::Wait;
                     }
                 };
                 *counter += 1;
@@ -1548,22 +1521,11 @@ fn select_and_prepare_task(state: &Arc<AppState>, current_idx: &mut usize) -> Se
         }
         None => {
             // Model not in config - pop and fail
-            let task = {
-                let mut queues = state.queues.lock().lock_unwrap("queues");
-                let queue = match queues.get_mut(&user_id) {
-                    Some(q) => q,
-                    None => {
-                        warn!("User {} disappeared from queues", user_id);
-                        return SelectionResult::Wait;
-                    }
-                };
-
-                match queue.pop_front() {
-                    Some(t) => t,
-                    None => {
-                        warn!("Queue for user {} became empty", user_id);
-                        return SelectionResult::Wait;
-                    }
+            let task = match queues.get_mut(&user_id).and_then(|q| q.pop_front()) {
+                Some(t) => t,
+                None => {
+                    warn!("User {} disappeared from queues", user_id);
+                    return SelectionResult::Wait;
                 }
             };
             *counter += 1;
