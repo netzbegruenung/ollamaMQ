@@ -103,7 +103,9 @@ impl DashboardServer {
         loop {
             itv.tick().await;
             if let Ok(snapshot) = Self::capture_snapshot(&state) {
-                let _ = tx.send(snapshot).await;
+                // Use try_send to avoid blocking if channel is full - drop old snapshots
+                // since each snapshot contains the latest log lines anyway
+                let _ = tx.try_send(snapshot);
             }
         }
     }
