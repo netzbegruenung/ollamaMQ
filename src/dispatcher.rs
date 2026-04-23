@@ -219,6 +219,12 @@ impl Write for LogBufferWriter {
     }
 }
 
+impl Drop for LogBufferWriter {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
+}
+
 /// MakeWriter implementation for LogBufferWriter
 impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBufferWriter {
     type Writer = Self;
