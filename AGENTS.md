@@ -41,9 +41,11 @@ Client → axum routes (main.rs:153) → proxy_handler (dispatcher.rs:1349)
 - `src/dashboard_server.rs` — bincode-encoded snapshots pushed every 100ms, accepts DashboardCmd
 - `src/protocol.rs` — `encode`/`decode` wire format: 4-byte BE length prefix + bincode payload
 
-**SIGHUP (main.rs:118):** reloads both `users.yaml` and `models.yaml` at runtime.
+**SIGHUP (main.rs:118):** reloads both `users.yaml` and `models.yaml` at runtime, then triggers immediate keep-alive for all models with `keep_alive: true`.
 
 **Blocked items** persist to `blocked_items.json` at the process working directory (dispatcher.rs:23).
+
+**Model keep-alive:** Runs every 15 minutes, on startup, and after SIGHUP reloads. Models can disable keep-alive by setting `keep_alive: false` in models.yaml (useful for embedding models). (dispatcher.rs:1341)
 
 ## Config format
 
@@ -54,6 +56,7 @@ models:
     public_name: "qwen35"
     backends: [http://host1:11434, http://host2:11434]
     aliases: [qwen3, qwen3:35b]
+    keep_alive: true  # default: true; set to false for embedding models (dispatcher.rs:337)
 ```
 
 **users.yaml:**

@@ -330,6 +330,15 @@ pub struct ParsedModel {
     /// Maximum concurrent requests per backend for this model (default: 1)
     #[serde(default = "default_max_concurrent_requests")]
     pub max_concurrent_requests: usize,
+
+    /// Whether to enable keep-alive for this model (default: true)
+    /// Set to false for embedding models that don't support keep-alive
+    #[serde(default = "default_keep_alive")]
+    pub keep_alive: bool,
+}
+
+fn default_keep_alive() -> bool {
+    true
 }
 
 fn default_max_concurrent_requests() -> usize {
@@ -372,12 +381,27 @@ impl BackendStatus {
             return;
         }
 
+        self.keep_alive_specific_models(client, &models, timeout_secs)
+            .await;
+    }
+
+    /// Send keep_alive requests for specific models
+    pub async fn keep_alive_specific_models(
+        &self,
+        client: &reqwest::Client,
+        models: &[String],
+        timeout_secs: u64,
+    ) {
+        if models.is_empty() {
+            return;
+        }
+
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
             .unwrap_or_else(|_| client.clone());
 
-        for model_name in &models {
+        for model_name in models {
             let model_name = model_name.clone();
             let url = format!("{}/api/generate", self.url);
             let body = serde_json::json!({
@@ -544,6 +568,8 @@ pub struct AppState {
     pub backends: Mutex<Vec<BackendStatus>>,
     pub last_backend_idx: Mutex<usize>,
     pub timeout: u64,
+    /// Shared reqwest client for backend requests
+    pub client: reqwest::Client,
     /// User registry loaded from users.yaml
     pub user_registry: Mutex<Arc<UserRegistry>>,
     /// Model configuration: real models with backends and aliases
@@ -610,6 +636,11 @@ impl AppState {
             );
         }
 
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(timeout))
+            .build()
+            .expect("Failed to create reqwest client");
+
         Ok(Self {
             queues: Mutex::new(HashMap::new()),
             processing_counts: Mutex::new(HashMap::new()),
@@ -625,6 +656,7 @@ impl AppState {
             backends: Mutex::new(backends),
             last_backend_idx: Mutex::new(0),
             timeout,
+            client,
             user_registry: Mutex::new(Arc::new(registry)),
             model_config: Arc::new(RwLock::new(model_config)),
             debug,
@@ -693,6 +725,48 @@ impl AppState {
         }
 
         Ok(())
+    }
+
+    /// Spawn keep-alive for a single backend's eligible models
+    fn spawn_keep_alive_for_backend(&self, backend: &BackendStatus) {
+        let config = self.model_config.read().expect("model_config read");
+        let models_to_keep: Vec<String> = backend
+            .configured_models
+            .iter()
+            .filter(|model_name| {
+                config
+                    .get_model(model_name)
+                    .map(|m| m.keep_alive)
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect();
+        drop(config);
+
+        if models_to_keep.is_empty() {
+            return;
+        }
+
+        let backend_clone = backend.clone();
+        let client_clone = self.client.clone();
+        let timeout = self.timeout;
+
+        tokio::spawn(async move {
+            backend_clone
+                .keep_alive_specific_models(&client_clone, &models_to_keep, timeout)
+                .await;
+        });
+    }
+
+    /// Trigger keep-alive for all online backends
+    pub async fn trigger_all_keep_alives(&self) {
+        let backends = self.backends.lock().lock_unwrap("backends");
+
+        for backend in backends.iter() {
+            if backend.is_online {
+                self.spawn_keep_alive_for_backend(backend);
+            }
+        }
     }
 
     #[allow(clippy::collapsible_if)]
@@ -1217,10 +1291,10 @@ async fn handle_model_not_found(task: Task, model_name: String) {
     let _ = task.responder.send(ResponsePart::Chunk(error_body)).await;
 }
 
-fn spawn_health_checker(state: Arc<AppState>, client: reqwest::Client) {
+fn spawn_health_checker(state: Arc<AppState>) {
     tokio::spawn(async move {
         // Build initial cache
-        let _ = build_tags_cache(&state, &client).await;
+        let _ = build_tags_cache(&state, &state.client).await;
 
         loop {
             let backends_to_check: Vec<(usize, String)> = {
@@ -1234,7 +1308,7 @@ fn spawn_health_checker(state: Arc<AppState>, client: reqwest::Client) {
 
             for (idx, url) in backends_to_check {
                 let check_url = format!("{}/api/tags", url);
-                match client.get(&check_url).send().await {
+                match state.client.get(&check_url).send().await {
                     Ok(resp) => {
                         // Parse full model info from the response
                         let backend_models: Vec<BackendModelInfo> = resp
@@ -1251,7 +1325,7 @@ fn spawn_health_checker(state: Arc<AppState>, client: reqwest::Client) {
                             .unwrap_or_default();
 
                         // Keep alive all configured models when backend comes back online
-                        let backend_clone = {
+                        let backend = {
                             let mut backends = state.backends.lock().lock_unwrap("backends");
                             let backend = &mut backends[idx];
 
@@ -1264,13 +1338,8 @@ fn spawn_health_checker(state: Arc<AppState>, client: reqwest::Client) {
                             }
                         };
 
-                        // Keep alive models outside the lock
-                        if let Some(backend) = backend_clone {
-                            let client_clone = client.clone();
-                            let timeout = state.timeout;
-                            tokio::spawn(async move {
-                                backend.keep_alive_models(&client_clone, timeout).await;
-                            });
+                        if let Some(backend) = backend {
+                            state.spawn_keep_alive_for_backend(&backend);
                         }
 
                         // Update per-model status (use base-name matching)
@@ -1331,34 +1400,21 @@ fn spawn_health_checker(state: Arc<AppState>, client: reqwest::Client) {
             }
 
             // Build merged cache after checking all backends
-            let _ = build_tags_cache(&state, &client).await;
+            let _ = build_tags_cache(&state, &state.client).await;
 
             tokio::time::sleep(std::time::Duration::from_secs(state.health_check_interval)).await;
         }
     });
 }
 
-fn spawn_model_keeper(state: Arc<AppState>, client: reqwest::Client) {
+fn spawn_model_keeper(state: Arc<AppState>) {
     tokio::spawn(async move {
         let keep_alive_interval = std::time::Duration::from_secs(15 * 60); // 15 minutes
 
         loop {
             tokio::time::sleep(keep_alive_interval).await;
 
-            let backends = state.backends.lock().lock_unwrap("backends");
-            for backend in backends.iter() {
-                if backend.is_online && !backend.configured_models.is_empty() {
-                    let backend_clone = backend.clone();
-                    let client_clone = client.clone();
-                    let timeout = state.timeout;
-
-                    tokio::spawn(async move {
-                        backend_clone
-                            .keep_alive_models(&client_clone, timeout)
-                            .await;
-                    });
-                }
-            }
+            state.trigger_all_keep_alives().await;
         }
     });
 }
@@ -1607,14 +1663,14 @@ fn select_and_prepare_task(state: &Arc<AppState>, current_idx: &mut usize) -> Se
 }
 
 pub async fn run_worker(state: Arc<AppState>) {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(state.timeout))
-        .build()
-        .expect("Failed to create reqwest client - this should never happen");
     let mut current_idx = 0;
 
-    spawn_health_checker(state.clone(), client.clone());
-    spawn_model_keeper(state.clone(), client.clone());
+    // Trigger keep-alive on startup
+    info!("Triggering initial model keep-alive");
+    state.trigger_all_keep_alives().await;
+
+    spawn_health_checker(state.clone());
+    spawn_model_keeper(state.clone());
 
     loop {
         let selection = select_and_prepare_task(&state, &mut current_idx);
@@ -1630,7 +1686,7 @@ pub async fn run_worker(state: Arc<AppState>) {
                     backend_idx,
                     backend_url,
                     state: state.clone(),
-                    client: client.clone(),
+                    client: state.client.clone(),
                 });
             }
             SelectionResult::Wait => {
@@ -1907,6 +1963,10 @@ mod tests {
         let registry = Arc::new(UserRegistry::empty());
         let log_buffer = LogBuffer::new(100);
         let config = ModelConfig { models: vec![] };
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .unwrap();
 
         Arc::new(AppState {
             queues: Mutex::new(HashMap::new()),
@@ -1923,6 +1983,7 @@ mod tests {
             backends: Mutex::new(vec![]),
             last_backend_idx: Mutex::new(0),
             timeout: 300,
+            client,
             user_registry: Mutex::new(registry),
             model_config: Arc::new(RwLock::new(config)),
             debug: false,

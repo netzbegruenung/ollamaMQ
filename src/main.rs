@@ -163,6 +163,12 @@ async fn main() {
                 eprintln!("Continuing with existing configuration");
             } else {
                 info!("Model config reloaded from {} via SIGHUP", config_path);
+                // Trigger keep-alive for all models after successful reload
+                let sighup_state_clone = sighup_state.clone();
+                tokio::spawn(async move {
+                    info!("Triggering keep-alive after SIGHUP");
+                    sighup_state_clone.trigger_all_keep_alives().await;
+                });
             }
         }
     });
