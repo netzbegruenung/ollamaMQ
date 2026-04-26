@@ -11,7 +11,7 @@
 ## 🚀 Features
 
 - **Multi-Backend Load Balancing**: Distribute requests across multiple Ollama instances using a **Least Connections + Round Robin** strategy.
-- **Parallel Processing**: Unlike basic proxies, `all-llama-proxy` can process multiple requests simultaneously (one per available backend), significantly increasing throughput for multiple users.
+- **Parallel Processing**: Unlike basic proxies, `all-llama-proxy` can process multiple requests simultaneously (configurable limit per backend), significantly increasing throughput for multiple users.
 - **Backend Health Checks**: Automatically monitors backend status every 10 seconds; offline instances are temporarily skipped and marked in the TUI.
 - **Config Reload**: reload the config with a SIGHUP signal without restarting the service.
 - **Authentication**: A simple user database that allows adding SHA256 sums of access tokens.

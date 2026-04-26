@@ -4,6 +4,7 @@ models:
     backends:
       - http://10.137.1.1:11434
       - http://10.137.1.2:11434
+    max_concurrent_requests: 3  # allow up to 3 simultaneous requests per backend (default: 1)
     aliases:
       - "gpt-oss"
       - "gpt-oss:120b"
