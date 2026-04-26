@@ -326,6 +326,14 @@ pub struct ParsedModel {
     /// Alias names that resolve to this model
     #[serde(default)]
     pub aliases: Vec<String>,
+
+    /// Maximum concurrent requests per backend for this model (default: 1)
+    #[serde(default = "default_max_concurrent_requests")]
+    pub max_concurrent_requests: usize,
+}
+
+fn default_max_concurrent_requests() -> usize {
+    1
 }
 
 /// Runtime backend status
@@ -1358,16 +1366,12 @@ fn spawn_model_keeper(state: Arc<AppState>, client: reqwest::Client) {
 fn select_and_prepare_task(state: &Arc<AppState>, current_idx: &mut usize) -> SelectionResult {
     let mut queues = state.queues.lock().lock_unwrap("queues");
     let mut backends = state.backends.lock().lock_unwrap("backends");
-    let mut last_idx = state
-        .last_backend_idx
-        .lock()
-        .lock_unwrap("last_backend_idx");
 
-    // 1. Find all available online backends (Limit: 1 request per backend)
+    // 1. Find all available online backends (per-model concurrency limits apply below)
     let online_indices: Vec<usize> = backends
         .iter()
         .enumerate()
-        .filter(|(_, b)| b.is_online && b.active_requests < 1)
+        .filter(|(_, b)| b.is_online)
         .map(|(i, _)| i)
         .collect();
 
@@ -1514,25 +1518,51 @@ fn select_and_prepare_task(state: &Arc<AppState>, current_idx: &mut usize) -> Se
                 }
 
                 let selected_backend_idx = {
-                    // safe: eligible is guaranteed non-empty from earlier filter
-                    let min_conns = eligible
-                        .iter()
-                        .map(|&i| backends[i].active_requests)
-                        .min()
-                        .expect("eligible backends list should not be empty");
-                    let candidates: Vec<usize> = eligible
-                        .iter()
-                        .cloned()
-                        .filter(|&i| backends[i].active_requests == min_conns)
-                        .collect();
-                    let candidate_pos = candidates.iter().position(|&i| i > *last_idx).unwrap_or(0);
+                    // Get per-model concurrency limit from config
+                    let config = state.model_config.read().expect("model_config read");
+                    let max_concurrency = config
+                        .get_model(&model)
+                        .map(|m| m.max_concurrent_requests)
+                        .unwrap_or(1);
+                    drop(config);
 
-                    // Bounds check for safety
-                    let selected = candidates
-                        .get(candidate_pos % candidates.len())
-                        .copied()
-                        .expect("candidates should not be empty");
-                    *last_idx = selected;
+                    // Helper to get per-model count for this specific model
+                    let get_model_count = |backend_idx: usize| -> usize {
+                        backends[backend_idx]
+                            .active_models
+                            .get(&model)
+                            .copied()
+                            .unwrap_or(0)
+                    };
+
+                    // PHASE 1: Spread to backends with 0 requests for this model
+                    let backends_at_zero = eligible
+                        .iter()
+                        .filter(|&&i| get_model_count(i) == 0)
+                        .count();
+
+                    let selected = if backends_at_zero > 0 {
+                        // Phase 1: spread to backends with 0 requests for this model
+                        eligible
+                            .iter()
+                            .min_by_key(|&&i| get_model_count(i))
+                            .copied()
+                            .unwrap()
+                    } else if eligible
+                        .iter()
+                        .any(|&i| get_model_count(i) < max_concurrency)
+                    {
+                        // Phase 2: all backends at 1+, allow concurrency up to max
+                        eligible
+                            .iter()
+                            .filter(|&&i| get_model_count(i) < max_concurrency)
+                            .min_by_key(|&&i| get_model_count(i))
+                            .copied()
+                            .unwrap()
+                    } else {
+                        // All backends at max concurrency - wait without consuming task
+                        return SelectionResult::Wait;
+                    };
                     selected
                 };
 
