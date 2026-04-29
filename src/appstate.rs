@@ -276,37 +276,20 @@ impl BackendStatus {
 
     /// Check if this backend can serve a specific model
     pub fn can_serve_model(&self, model_name: &str) -> bool {
-        // Extract base model name (without tag) for flexible matching
-        let request_base = model_name.split(':').next().unwrap_or(model_name);
-
-        // Check if any configured model matches (by base name or exact)
-        let has_matching_config = self.configured_models.iter().any(|configured| {
-            let configured_base = configured.split(':').next().unwrap_or(configured);
-            configured == model_name || configured_base == request_base
-        });
+        // Check if any configured model matches exactly
+        let has_matching_config = self
+            .configured_models
+            .iter()
+            .any(|configured| configured == model_name);
 
         if !has_matching_config {
             return false;
         }
 
-        // Check per-model verification status using base-name matching
+        // Check per-model verification status (exact match)
         self.model_status
             .read()
-            .map(|status| {
-                status
-                    .get(model_name)
-                    .copied()
-                    .or_else(|| {
-                        status
-                            .iter()
-                            .find(|(k, _)| {
-                                let configured_base = k.split(':').next().unwrap_or(k);
-                                configured_base == request_base
-                            })
-                            .map(|(_, v)| *v)
-                    })
-                    .unwrap_or(true)
-            })
+            .map(|status| status.get(model_name).copied().unwrap_or(true))
             .unwrap_or(true)
     }
 }
